@@ -55,9 +55,12 @@ def health() -> dict[str, str]:
 @app.post("/answer", response_model=AnswerResponse)
 def answer(req: AnswerRequest) -> AnswerResponse:
     state = AgentState(question=req.question, db_id=req.db)
+    trace_tags = ["agent", *[f"{key}:{value}" for key, value in sorted(req.tags.items())]]
     config: dict[str, Any] = {
         "callbacks": [_lf_handler] if _lf_handler is not None else [],
         "metadata": req.tags,
+        "tags": trace_tags,
+        "run_name": "text-to-sql-agent",
     }
     try:
         final = graph.invoke(state, config=config)
