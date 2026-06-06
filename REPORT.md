@@ -150,3 +150,77 @@ This trace contains the expected waterfall: `generate_sql`, `execute`, `verify`,
 Conclusion:
 
 Phase 4 tracing works after callback propagation. The most important finding is that attaching a Langfuse callback only at the FastAPI boundary is not enough for this graph: nested LLM invocations must receive the same runnable config, otherwise the top-level trace can exist without useful model spans. The trace tags are usable for Phase 6 filtering by phase, run, VM, and question index.
+
+## Phase 5: Baseline Eval
+
+Eval runner: `evals/run_eval.py`
+
+Result artifact: `results/eval_baseline.json`
+
+Grafana screenshot: `screenshots/grafana_eval_run.png`
+
+Scoring method:
+
+- For each question, the runner calls the agent over HTTP.
+- It extracts each `generate_sql` / `revise` SQL attempt from the agent history.
+- It executes the gold SQL and predicted SQL against the same BIRD SQLite database.
+- It compares canonicalized row sets, ignoring column-name case by comparing rows only.
+- Per-attempt pass rates use carry-forward semantics after the agent stops.
+
+Baseline results:
+
+| Metric | Result |
+|---|---:|
+| Eval questions | 30 |
+| Correct final answers | 10 |
+| Overall execution accuracy | 33.3% |
+| Agent errors | 0 |
+| Final SQL execution errors | 0 |
+| Questions triggering revise | 11 |
+| Wall-clock eval time | 57.9s |
+
+Per-attempt pass rate:
+
+| Attempt | Correct | Pass rate |
+|---:|---:|---:|
+| 1 / zero-based iter 0 | 10 / 30 | 33.3% |
+| 2 / zero-based iter 1 | 10 / 30 | 33.3% |
+| 3 / zero-based iter 2 | 10 / 30 | 33.3% |
+
+Revision impact:
+
+| Initial correctness -> final correctness | Count |
+|---|---:|
+| Incorrect -> incorrect | 20 |
+| Correct -> correct | 10 |
+| Incorrect -> correct | 0 |
+| Correct -> incorrect | 0 |
+
+Among the 11 questions that triggered `revise`, all were incorrect on the first attempt and remained incorrect after revision. The loop did not hurt any initially correct answer, but it also did not recover any initially wrong answer.
+
+Per-database accuracy:
+
+| DB | Correct / Total |
+|---|---:|
+| `student_club` | 3 / 4 |
+| `financial` | 2 / 3 |
+| `superhero` | 2 / 3 |
+| `california_schools` | 1 / 3 |
+| `card_games` | 1 / 3 |
+| `codebase_community` | 1 / 5 |
+| `formula_1` | 0 / 4 |
+| `thrombosis_prediction` | 0 / 3 |
+| `toxicology` | 0 / 2 |
+
+Grafana observations during the eval:
+
+- The dashboard shows the baseline eval burst at roughly 1.5 chat-completion requests/sec.
+- Prompt throughput briefly peaked around 850 prompt tokens/sec, with much lower generation-token throughput.
+- Chat-completion p95/p99 stayed around 1s for this sequential eval run.
+- Time to first token stayed below roughly 60ms.
+- Scheduler waiting stayed at zero; running briefly reached one request.
+- KV cache remained effectively unconstrained, with no visible preemption pressure.
+
+Conclusion:
+
+The current verify/revise architecture does not earn its keep on this baseline. It creates useful observability and catches questionable outputs, but the revise prompt/model behavior does not convert wrong SQL into correct SQL on the eval set. The immediate quality work should focus on stronger revision instructions, explicit use of gold-like schema evidence in the prompt, and better handling of domain-specific SQL details in `formula_1`, `toxicology`, and `thrombosis_prediction`.

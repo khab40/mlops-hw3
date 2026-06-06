@@ -17,6 +17,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -25,6 +26,7 @@ DEFAULT_EVAL_FILE = ROOT / "evals" / "eval_set.jsonl"
 DEFAULT_OUT_FILE = ROOT / "results" / "eval_baseline.json"
 DB_DIR = ROOT / "data" / "bird"
 AGENT_URL_DEFAULT = "http://localhost:8001/answer"
+MAX_ATTEMPTS = 3
 
 
 # ---------- Helpers (provided) -----------------------------------------
@@ -58,7 +60,77 @@ def matches(gold_rows: list[tuple] | None, pred_rows: list[tuple] | None) -> boo
 
 def eval_one(question: dict, agent_url: str) -> dict:
     """Score one question. Return a dict capturing per-iteration correctness."""
-    raise NotImplementedError("Phase 5")
+    gold_ok, gold_rows, gold_error = run_sql(question["db_id"], question["gold_sql"])
+    started = time.monotonic()
+    agent_error: str | None = None
+    response: dict[str, Any] | None = None
+
+    try:
+        with httpx.Client(timeout=180.0) as client:
+            resp = client.post(
+                agent_url,
+                json={
+                    "question": question["question"],
+                    "db": question["db_id"],
+                    "tags": {
+                        "phase": "5",
+                        "run": "baseline-eval",
+                        "db": question["db_id"],
+                    },
+                },
+            )
+            resp.raise_for_status()
+            response = resp.json()
+    except Exception as e:  # noqa: BLE001
+        agent_error = f"{type(e).__name__}: {e}"
+
+    history = response.get("history", []) if response else []
+    attempts: list[dict[str, Any]] = []
+    for entry in history:
+        if entry.get("node") not in {"generate_sql", "revise"}:
+            continue
+        sql = str(entry.get("sql") or "").strip()
+        pred_ok, pred_rows, pred_error = run_sql(question["db_id"], sql) if sql else (False, None, "empty SQL")
+        correct = matches(gold_rows, pred_rows) if gold_ok and pred_ok else False
+        attempts.append({
+            "attempt": len(attempts) + 1,
+            "zero_based_iteration": len(attempts),
+            "node": entry.get("node"),
+            "sql": sql,
+            "execution_ok": pred_ok,
+            "execution_error": pred_error,
+            "correct": correct,
+        })
+
+    # If the server returned SQL but history was missing, still score the served answer.
+    if not attempts and response and response.get("sql"):
+        sql = str(response["sql"]).strip()
+        pred_ok, pred_rows, pred_error = run_sql(question["db_id"], sql)
+        attempts.append({
+            "attempt": 1,
+            "zero_based_iteration": 0,
+            "node": "final",
+            "sql": sql,
+            "execution_ok": pred_ok,
+            "execution_error": pred_error,
+            "correct": matches(gold_rows, pred_rows) if gold_ok and pred_ok else False,
+        })
+
+    final_attempt = attempts[-1] if attempts else None
+    return {
+        "db_id": question["db_id"],
+        "question": question["question"],
+        "gold_sql": question["gold_sql"],
+        "gold_execution_ok": gold_ok,
+        "gold_execution_error": gold_error,
+        "agent_ok": bool(response and response.get("ok")),
+        "agent_error": agent_error or (response.get("error") if response else None),
+        "agent_iterations": response.get("iterations") if response else 0,
+        "latency_seconds": time.monotonic() - started,
+        "final_sql": response.get("sql") if response else "",
+        "final_correct": bool(final_attempt and final_attempt["correct"]),
+        "attempts": attempts,
+    }
 
 
 def summarize(results: list[dict]) -> dict:
@@ -70,7 +142,46 @@ def summarize(results: list[dict]) -> dict:
     The agent stopped emitting; whatever it had at termination is what
     would have been served had we polled at iteration k.
     """
-    raise NotImplementedError("Phase 5")
+    total = len(results)
+    correct = sum(1 for r in results if r.get("final_correct"))
+    with_revise = sum(1 for r in results if int(r.get("agent_iterations") or 0) > 1)
+    agent_errors = sum(1 for r in results if r.get("agent_error"))
+    execution_errors = sum(
+        1
+        for r in results
+        if r.get("attempts") and r["attempts"][-1].get("execution_ok") is False
+    )
+
+    def carried_correct(result: dict, attempt_number: int) -> bool:
+        attempts = result.get("attempts") or []
+        if not attempts:
+            return False
+        idx = min(attempt_number - 1, len(attempts) - 1)
+        return bool(attempts[idx].get("correct"))
+
+    pass_by_attempt: dict[str, dict[str, float | int]] = {}
+    pass_by_zero_based_iteration: dict[str, dict[str, float | int]] = {}
+    for attempt_number in range(1, MAX_ATTEMPTS + 1):
+        n_correct = sum(1 for r in results if carried_correct(r, attempt_number))
+        rate = (n_correct / total) if total else 0.0
+        pass_by_attempt[str(attempt_number)] = {"correct": n_correct, "total": total, "pass_rate": rate}
+        pass_by_zero_based_iteration[str(attempt_number - 1)] = {
+            "correct": n_correct,
+            "total": total,
+            "pass_rate": rate,
+        }
+
+    return {
+        "total": total,
+        "correct": correct,
+        "overall_pass_rate": (correct / total) if total else 0.0,
+        "agent_errors": agent_errors,
+        "final_execution_errors": execution_errors,
+        "with_revise": with_revise,
+        "max_attempts": MAX_ATTEMPTS,
+        "pass_by_attempt": pass_by_attempt,
+        "pass_by_zero_based_iteration": pass_by_zero_based_iteration,
+    }
 
 
 # ---------- Main (provided) --------------------------------------------
