@@ -1,0 +1,276 @@
+{
+  "summary": {
+    "total": 5,
+    "with_revise": 1,
+    "max_iterations": 3,
+    "executed_ok": 5,
+    "final_verify_ok": 4,
+    "hit_iteration_cap": 1
+  },
+  "results": [
+    {
+      "index": 1,
+      "question": "What is the coordinates location of the circuits for Australian grand prix?",
+      "db_id": "formula_1",
+      "status": "ok",
+      "latency_seconds": 3.341864972000053,
+      "response": {
+        "sql": "SELECT \"lat\", \"lng\"\nFROM \"circuits\"\nJOIN \"races\" ON \"circuits\".\"circuitId\" = \"races\".\"circuitId\"\nWHERE \"races\".\"name\" = 'Australian Grand Prix';",
+        "rows": [
+          [
+            -34.9272,
+            138.617
+          ],
+          [
+            -34.9272,
+            138.617
+          ],
+          [
+            -34.9272,
+            138.617
+          ],
+          [
+            -34.9272,
+            138.617
+          ],
+          [
+            -34.9272,
+            138.617
+          ],
+          [
+            -34.9272,
+            138.617
+          ],
+          [
+            -34.9272,
+            138.617
+          ],
+          [
+            -34.9272,
+            138.617
+          ],
+          [
+            -34.9272,
+            138.617
+          ],
+          [
+            -34.9272,
+            138.617
+          ],
+          [
+            -34.9272,
+            138.617
+          ]
+        ],
+        "iterations": 1,
+        "ok": true,
+        "error": null,
+        "history": [
+          {
+            "node": "generate_sql",
+            "sql": "SELECT \"lat\", \"lng\"\nFROM \"circuits\"\nJOIN \"races\" ON \"circuits\".\"circuitId\" = \"races\".\"circuitId\"\nWHERE \"races\".\"name\" = 'Australian Grand Prix';"
+          },
+          {
+            "node": "verify",
+            "ok": true,
+            "issue": "Verifier accepted the result.",
+            "raw": "{\"ok\": true, \"issue\": \"\"}"
+          }
+        ]
+      },
+      "triggered_revise": false,
+      "final_verify_ok": true,
+      "verify_issues": [
+        "Verifier accepted the result."
+      ]
+    },
+    {
+      "index": 2,
+      "question": "List down Ajax's superpowers.",
+      "db_id": "superhero",
+      "status": "ok",
+      "latency_seconds": 0.4948417649999328,
+      "response": {
+        "sql": "SELECT sp.\"power_name\"\nFROM \"superhero\" s\nJOIN \"hero_power\" hp ON s.\"id\" = hp.\"hero_id\"\nJOIN \"superpower\" sp ON hp.\"power_id\" = sp.\"id\"\nWHERE s.\"superhero_name\" = 'Ajax';",
+        "rows": [
+          [
+            "Agility"
+          ],
+          [
+            "Super Strength"
+          ],
+          [
+            "Super Speed"
+          ],
+          [
+            "Heat Generation"
+          ],
+          [
+            "Power Suit"
+          ]
+        ],
+        "iterations": 1,
+        "ok": true,
+        "error": null,
+        "history": [
+          {
+            "node": "generate_sql",
+            "sql": "SELECT sp.\"power_name\"\nFROM \"superhero\" s\nJOIN \"hero_power\" hp ON s.\"id\" = hp.\"hero_id\"\nJOIN \"superpower\" sp ON hp.\"power_id\" = sp.\"id\"\nWHERE s.\"superhero_name\" = 'Ajax';"
+          },
+          {
+            "node": "verify",
+            "ok": true,
+            "issue": "Verifier accepted the result.",
+            "raw": "{\"ok\": true, \"issue\": \"\"}"
+          }
+        ]
+      },
+      "triggered_revise": false,
+      "final_verify_ok": true,
+      "verify_issues": [
+        "Verifier accepted the result."
+      ]
+    },
+    {
+      "index": 3,
+      "question": "List the top five schools, by descending order, from the highest to the lowest, the most number of Enrollment (Ages 5-17). Please give their NCES school identification number.",
+      "db_id": "california_schools",
+      "status": "ok",
+      "latency_seconds": 0.6450029610000456,
+      "response": {
+        "sql": "SELECT s.\"NCESSchool\"\nFROM \"schools\" s\nJOIN \"frpm\" f ON s.\"CDSCode\" = f.\"CDSCode\"\nORDER BY f.\"Enrollment (Ages 5-17)\" DESC\nLIMIT 5;",
+        "rows": [
+          [
+            "11707"
+          ],
+          [
+            "04653"
+          ],
+          [
+            "08283"
+          ],
+          [
+            "02751"
+          ],
+          [
+            "03050"
+          ]
+        ],
+        "iterations": 1,
+        "ok": true,
+        "error": null,
+        "history": [
+          {
+            "node": "generate_sql",
+            "sql": "SELECT s.\"NCESSchool\"\nFROM \"schools\" s\nJOIN \"frpm\" f ON s.\"CDSCode\" = f.\"CDSCode\"\nORDER BY f.\"Enrollment (Ages 5-17)\" DESC\nLIMIT 5;"
+          },
+          {
+            "node": "verify",
+            "ok": true,
+            "issue": "Verifier accepted the result.",
+            "raw": "{\"ok\": true, \"issue\": \"\"}"
+          }
+        ]
+      },
+      "triggered_revise": false,
+      "final_verify_ok": true,
+      "verify_issues": [
+        "Verifier accepted the result."
+      ]
+    },
+    {
+      "index": 4,
+      "question": "What is the average number of crimes committed in 1995 in regions where the number exceeds 4000 and the region has accounts that are opened starting from the year 1997?",
+      "db_id": "financial",
+      "status": "ok",
+      "latency_seconds": 1.9007336390000091,
+      "response": {
+        "sql": "SELECT AVG(d.\"A14\") AS average_crimes\nFROM \"district\" d\nWHERE d.\"A14\" > 4000\n  AND EXISTS (\n    SELECT 1\n    FROM \"account\" a\n    WHERE a.\"district_id\" = d.\"district_id\"\n      AND strftime('%Y', a.\"date\") >= '1997'\n  );",
+        "rows": [
+          [
+            null
+          ]
+        ],
+        "iterations": 3,
+        "ok": true,
+        "error": null,
+        "history": [
+          {
+            "node": "generate_sql",
+            "sql": "SELECT AVG(d.\"A14\") AS average_crimes\nFROM \"district\" d\nWHERE d.\"A14\" > 4000\n  AND EXISTS (\n    SELECT 1\n    FROM \"account\" a\n    WHERE a.\"district_id\" = d.\"district_id\"\n      AND strftime('%Y', a.\"date\") >= '1997'\n  );"
+          },
+          {
+            "node": "verify",
+            "ok": false,
+            "issue": "no data returned",
+            "raw": "{\"ok\": false, \"issue\": \"no data returned\"}"
+          },
+          {
+            "node": "revise",
+            "issue": "no data returned",
+            "sql": "SELECT AVG(d.\"A14\") AS average_crimes\nFROM \"district\" d\nWHERE d.\"A14\" > 4000\n  AND EXISTS (\n    SELECT 1\n    FROM \"account\" a\n    WHERE a.\"district_id\" = d.\"district_id\"\n      AND strftime('%Y', a.\"date\") >= '1997'\n  );"
+          },
+          {
+            "node": "verify",
+            "ok": false,
+            "issue": "no data returned",
+            "raw": "{\"ok\": false, \"issue\": \"no data returned\"}"
+          },
+          {
+            "node": "revise",
+            "issue": "no data returned",
+            "sql": "SELECT AVG(d.\"A14\") AS average_crimes\nFROM \"district\" d\nWHERE d.\"A14\" > 4000\n  AND EXISTS (\n    SELECT 1\n    FROM \"account\" a\n    WHERE a.\"district_id\" = d.\"district_id\"\n      AND strftime('%Y', a.\"date\") >= '1997'\n  );"
+          },
+          {
+            "node": "verify",
+            "ok": false,
+            "issue": "no data returned",
+            "raw": "{\"ok\": false, \"issue\": \"no data returned\"}"
+          }
+        ]
+      },
+      "triggered_revise": true,
+      "final_verify_ok": false,
+      "verify_issues": [
+        "no data returned",
+        "no data returned",
+        "no data returned"
+      ]
+    },
+    {
+      "index": 5,
+      "question": "How many male clients in 'Hl.m. Praha' district?",
+      "db_id": "financial",
+      "status": "ok",
+      "latency_seconds": 0.43554526900004475,
+      "response": {
+        "sql": "SELECT COUNT(*) \nFROM \"client\" c\nJOIN \"district\" d ON c.\"district_id\" = d.\"district_id\"\nWHERE c.\"gender\" = 'M' AND d.\"A2\" = 'Hl.m. Praha';",
+        "rows": [
+          [
+            339
+          ]
+        ],
+        "iterations": 1,
+        "ok": true,
+        "error": null,
+        "history": [
+          {
+            "node": "generate_sql",
+            "sql": "SELECT COUNT(*) \nFROM \"client\" c\nJOIN \"district\" d ON c.\"district_id\" = d.\"district_id\"\nWHERE c.\"gender\" = 'M' AND d.\"A2\" = 'Hl.m. Praha';"
+          },
+          {
+            "node": "verify",
+            "ok": true,
+            "issue": "Verifier accepted the result.",
+            "raw": "{\"ok\": true, \"issue\": \"\"}"
+          }
+        ]
+      },
+      "triggered_revise": false,
+      "final_verify_ok": true,
+      "verify_issues": [
+        "Verifier accepted the result."
+      ]
+    }
+  ]
+}
