@@ -1,6 +1,10 @@
 # Home assignment: LLM inference + o11y
 
-  
+<p align="center">
+  <img src="assets/img/github-banner.jpg" alt="Nebius AI PE LLM inference and observability assignment banner">
+</p>
+
+See [Architecture](assets/docs/ARCHITECTURE.md) for the system overview and use-case diagrams.
 
 ## Legend
 
