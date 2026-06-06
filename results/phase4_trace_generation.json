@@ -1,0 +1,243 @@
+{
+  "summary": {
+    "total": 10,
+    "ok": 10,
+    "with_revise": 3,
+    "max_iterations": 3,
+    "tag_filter": "phase:4 run:phase4-smoke"
+  },
+  "results": [
+    {
+      "index": 1,
+      "db_id": "formula_1",
+      "question": "What is the coordinates location of the circuits for Australian grand prix?",
+      "tags": {
+        "phase": "4",
+        "run": "phase4-smoke",
+        "vm": "89.169.115.163",
+        "question_index": "1"
+      },
+      "status": "ok",
+      "ok": true,
+      "iterations": 1,
+      "triggered_revise": false,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "latency_seconds": 0.6954237669999657,
+      "sql": "SELECT \"lat\", \"lng\"\nFROM \"circuits\"\nJOIN \"races\" ON \"circuits\".\"circuitId\" = \"races\".\"circuitId\"\nWHERE \"races\".\"name\" = 'Australian Grand Prix';",
+      "error": null
+    },
+    {
+      "index": 2,
+      "db_id": "superhero",
+      "question": "List down Ajax's superpowers.",
+      "tags": {
+        "phase": "4",
+        "run": "phase4-smoke",
+        "vm": "89.169.115.163",
+        "question_index": "2"
+      },
+      "status": "ok",
+      "ok": true,
+      "iterations": 1,
+      "triggered_revise": false,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "latency_seconds": 0.4590638160000253,
+      "sql": "SELECT sp.\"power_name\"\nFROM \"superhero\" s\nJOIN \"hero_power\" hp ON s.\"id\" = hp.\"hero_id\"\nJOIN \"superpower\" sp ON hp.\"power_id\" = sp.\"id\"\nWHERE s.\"superhero_name\" = 'Ajax';",
+      "error": null
+    },
+    {
+      "index": 3,
+      "db_id": "california_schools",
+      "question": "List the top five schools, by descending order, from the highest to the lowest, the most number of Enrollment (Ages 5-17). Please give their NCES school identification number.",
+      "tags": {
+        "phase": "4",
+        "run": "phase4-smoke",
+        "vm": "89.169.115.163",
+        "question_index": "3"
+      },
+      "status": "ok",
+      "ok": true,
+      "iterations": 1,
+      "triggered_revise": false,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "latency_seconds": 0.44558807099997466,
+      "sql": "SELECT s.\"NCESSchool\"\nFROM \"schools\" s\nJOIN \"frpm\" f ON s.\"CDSCode\" = f.\"CDSCode\"\nORDER BY f.\"Enrollment (Ages 5-17)\" DESC\nLIMIT 5;",
+      "error": null
+    },
+    {
+      "index": 4,
+      "db_id": "financial",
+      "question": "What is the average number of crimes committed in 1995 in regions where the number exceeds 4000 and the region has accounts that are opened starting from the year 1997?",
+      "tags": {
+        "phase": "4",
+        "run": "phase4-smoke",
+        "vm": "89.169.115.163",
+        "question_index": "4"
+      },
+      "status": "ok",
+      "ok": true,
+      "iterations": 3,
+      "triggered_revise": true,
+      "history_nodes": [
+        "generate_sql",
+        "verify",
+        "revise",
+        "verify",
+        "revise",
+        "verify"
+      ],
+      "latency_seconds": 1.826764011000023,
+      "sql": "SELECT AVG(d.\"A14\") AS average_crimes\nFROM \"district\" d\nWHERE d.\"A14\" > 4000\n  AND EXISTS (\n    SELECT 1\n    FROM \"account\" a\n    WHERE a.\"district_id\" = d.\"district_id\"\n      AND strftime('%Y', a.\"date\") >= '1997'\n  );",
+      "error": null
+    },
+    {
+      "index": 5,
+      "db_id": "financial",
+      "question": "How many male clients in 'Hl.m. Praha' district?",
+      "tags": {
+        "phase": "4",
+        "run": "phase4-smoke",
+        "vm": "89.169.115.163",
+        "question_index": "5"
+      },
+      "status": "ok",
+      "ok": true,
+      "iterations": 1,
+      "triggered_revise": false,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "latency_seconds": 0.4191938980000032,
+      "sql": "SELECT COUNT(*) \nFROM \"client\" c\nJOIN \"district\" d ON c.\"district_id\" = d.\"district_id\"\nWHERE c.\"gender\" = 'M' AND d.\"A2\" = 'Hl.m. Praha';",
+      "error": null
+    },
+    {
+      "index": 6,
+      "db_id": "formula_1",
+      "question": "What is the average fastest lap time in seconds for Lewis Hamilton in all the Formula_1 races?",
+      "tags": {
+        "phase": "4",
+        "run": "phase4-smoke",
+        "vm": "89.169.115.163",
+        "question_index": "6"
+      },
+      "status": "ok",
+      "ok": true,
+      "iterations": 3,
+      "triggered_revise": true,
+      "history_nodes": [
+        "generate_sql",
+        "verify",
+        "revise",
+        "verify",
+        "revise",
+        "verify"
+      ],
+      "latency_seconds": 3.5447649860000183,
+      "sql": "SELECT AVG(CAST(SUBSTR(r.\"fastestLapTime\", 1, 2) AS REAL) * 3600 + \n                  CAST(SUBSTR(r.\"fastestLapTime\", 4, 2) AS REAL) * 60 + \n                  CAST(SUBSTR(r.\"fastestLapTime\", 7, 2) AS REAL) + \n                  CAST(SUBSTR(r.\"fastestLapTime\", 10, 3) AS REAL) / 1000) AS average_fastest_lap_seconds\nFROM \"results\" r\nJOIN \"drivers\" d ON r.\"driverId\" = d.\"driverId\"\nWHERE d.\"forename\" = 'Lewis' AND d.\"surname\" = 'Hamilton' AND r.\"fastestLapTime\" IS NOT NULL;",
+      "error": null
+    },
+    {
+      "index": 7,
+      "db_id": "formula_1",
+      "question": "From race no. 50 to 100, how many finishers have been disqualified?",
+      "tags": {
+        "phase": "4",
+        "run": "phase4-smoke",
+        "vm": "89.169.115.163",
+        "question_index": "7"
+      },
+      "status": "ok",
+      "ok": true,
+      "iterations": 1,
+      "triggered_revise": false,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "latency_seconds": 0.3866531240000768,
+      "sql": "SELECT COUNT(*) \nFROM results \nWHERE raceId BETWEEN 50 AND 100 \n  AND statusId IN (\n    SELECT statusId \n    FROM status \n    WHERE status = 'Disqualified'\n  );",
+      "error": null
+    },
+    {
+      "index": 8,
+      "db_id": "student_club",
+      "question": "Calculate the difference of the total amount spent in all events by the Student_Club in year 2019 and 2020.",
+      "tags": {
+        "phase": "4",
+        "run": "phase4-smoke",
+        "vm": "89.169.115.163",
+        "question_index": "8"
+      },
+      "status": "ok",
+      "ok": true,
+      "iterations": 1,
+      "triggered_revise": false,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "latency_seconds": 0.560308952000014,
+      "sql": "SELECT \n  (SELECT SUM(b.spent) FROM budget b JOIN event e ON b.link_to_event = e.event_id WHERE e.event_date LIKE '2019-%') -\n  (SELECT SUM(b.spent) FROM budget b JOIN event e ON b.link_to_event = e.event_id WHERE e.event_date LIKE '2020-%') AS difference;",
+      "error": null
+    },
+    {
+      "index": 9,
+      "db_id": "california_schools",
+      "question": "What is the complete address of the school with the lowest excellence rate? Indicate the Street, City, Zip and State.",
+      "tags": {
+        "phase": "4",
+        "run": "phase4-smoke",
+        "vm": "89.169.115.163",
+        "question_index": "9"
+      },
+      "status": "ok",
+      "ok": true,
+      "iterations": 1,
+      "triggered_revise": false,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "latency_seconds": 0.569570055999975,
+      "sql": "SELECT s.\"Street\", s.\"City\", s.\"Zip\", s.\"State\"\nFROM \"schools\" s\nJOIN \"satscores\" ss ON s.\"CDSCode\" = ss.\"cds\"\nORDER BY ss.\"NumGE1500\" * 1.0 / ss.\"NumTstTakr\" ASC\nLIMIT 1;",
+      "error": null
+    },
+    {
+      "index": 10,
+      "db_id": "toxicology",
+      "question": "Calculate the percentage of carcinogenic molecules which contain the Chlorine element.",
+      "tags": {
+        "phase": "4",
+        "run": "phase4-smoke",
+        "vm": "89.169.115.163",
+        "question_index": "10"
+      },
+      "status": "ok",
+      "ok": true,
+      "iterations": 3,
+      "triggered_revise": true,
+      "history_nodes": [
+        "generate_sql",
+        "verify",
+        "revise",
+        "verify",
+        "revise",
+        "verify"
+      ],
+      "latency_seconds": 2.118413462000035,
+      "sql": "SELECT \n  CAST(SUM(CASE WHEN a.\"element\" = 'Cl' THEN 1 ELSE 0 END) AS FLOAT) * 100.0 / COUNT(DISTINCT m.\"molecule_id\") AS percentage\nFROM \"molecule\" m\nJOIN \"atom\" a ON m.\"molecule_id\" = a.\"molecule_id\"\nWHERE m.\"label\" = 'carcinogenic'\n  AND a.\"element\" = 'Cl';",
+      "error": null
+    }
+  ]
+}

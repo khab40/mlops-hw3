@@ -105,3 +105,48 @@ Revise case:
 Conclusion:
 
 The Phase 3 graph wiring is working: a verifier rejection really routes into `revise`, and the cap prevents infinite loops. The weak point is prompt effectiveness on the no-data aggregate case: the verifier detected a suspicious answer, but revise did not produce a different strategy. For Phase 5/6, this should be measured against execution accuracy and improved by making the revise prompt ask for an explicit alternative join/filter interpretation when the verifier reports empty or null aggregate results.
+
+## Phase 4: Agent Observability
+
+Langfuse endpoint: `http://localhost:3001`
+
+Agent endpoint: `http://localhost:8001/answer`
+
+Result artifact: `results/phase4_trace_generation.json`
+
+Screenshot artifacts:
+
+- `screenshots/langfuse_tags.png`
+- `screenshots/langfuse_trace.png`
+
+What was fixed:
+
+- The VM `.env` was repopulated with the local Langfuse keys so the agent SDK could authenticate.
+- Agent request tags are passed as LangChain run tags, not only metadata.
+- The graph now propagates the LangChain `config` object into nested LLM calls, so `generate_sql`, `verify`, and `revise` produce child observations under the same Langfuse trace.
+
+Verification run:
+
+| Metric | Result |
+|---|---:|
+| Agent requests | 10 |
+| Successful responses | 10 |
+| Requests triggering revise | 3 |
+| Max iterations observed | 3 |
+| Tagged Langfuse traces found | 20 |
+
+Trace tags used:
+
+- `agent`
+- `phase:4`
+- `run:phase4-smoke`
+- `question_index:N`
+- `vm:89.169.115.163`
+
+Selected revise trace: `d5df7d5248c3df71f46f7a6692f21919`
+
+This trace contains the expected waterfall: `generate_sql`, `execute`, `verify`, `revise`, another `execute` / `verify` cycle, and nested `ChatOpenAI` calls. Langfuse recorded 20 observations for the trace with 2,067 input tokens, 319 output tokens, and 2,386 total tokens.
+
+Conclusion:
+
+Phase 4 tracing works after callback propagation. The most important finding is that attaching a Langfuse callback only at the FastAPI boundary is not enough for this graph: nested LLM invocations must receive the same runnable config, otherwise the top-level trace can exist without useful model spans. The trace tags are usable for Phase 6 filtering by phase, run, VM, and question index.
