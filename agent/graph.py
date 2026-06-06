@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_openai import ChatOpenAI
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from agent import prompts
@@ -112,7 +113,7 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return {}
 
 
-def generate_sql_node(state: AgentState) -> dict:
+def generate_sql_node(state: AgentState, config: RunnableConfig) -> dict:
     """Worked example - the other LLM nodes follow this same shape.
 
     Build messages from the prompts, call the shared llm(), extract the SQL,
@@ -122,13 +123,16 @@ def generate_sql_node(state: AgentState) -> dict:
     This node is wired and ready; fill in GENERATE_SQL_SYSTEM / GENERATE_SQL_USER
     in prompts.py to make it produce real queries.
     """
-    response = llm().invoke([
-        ("system", prompts.GENERATE_SQL_SYSTEM),
-        ("user", prompts.GENERATE_SQL_USER.format(
-            schema=state.schema,
-            question=state.question,
-        )),
-    ])
+    response = llm().invoke(
+        [
+            ("system", prompts.GENERATE_SQL_SYSTEM),
+            ("user", prompts.GENERATE_SQL_USER.format(
+                schema=state.schema,
+                question=state.question,
+            )),
+        ],
+        config=config,
+    )
     sql = _extract_sql(response.content)
     return {
         "sql": sql,
@@ -142,7 +146,7 @@ def execute_node(state: AgentState) -> dict:
     return {"execution": execute_sql(state.db_id, state.sql)}
 
 
-def verify_node(state: AgentState) -> dict:
+def verify_node(state: AgentState, config: RunnableConfig) -> dict:
     """Decide whether state.execution plausibly answers state.question.
 
     Follow the generate_sql_node pattern: build messages from the VERIFY_*
@@ -156,14 +160,17 @@ def verify_node(state: AgentState) -> dict:
     in the README.
     """
     execution = state.execution.render() if state.execution else "ERROR: SQL was not executed."
-    response = llm().invoke([
-        ("system", prompts.VERIFY_SYSTEM),
-        ("user", prompts.VERIFY_USER.format(
-            question=state.question,
-            sql=state.sql,
-            execution=execution,
-        )),
-    ])
+    response = llm().invoke(
+        [
+            ("system", prompts.VERIFY_SYSTEM),
+            ("user", prompts.VERIFY_USER.format(
+                question=state.question,
+                sql=state.sql,
+                execution=execution,
+            )),
+        ],
+        config=config,
+    )
     parsed = _extract_json_object(response.content)
     ok = bool(parsed.get("ok", False))
     issue = str(parsed.get("issue") or "").strip()
@@ -181,7 +188,7 @@ def verify_node(state: AgentState) -> dict:
     }
 
 
-def revise_node(state: AgentState) -> dict:
+def revise_node(state: AgentState, config: RunnableConfig) -> dict:
     """Produce a revised SQL query given state.verify_issue and the prior attempt.
 
     Same shape as generate_sql_node, but the prompt should include the failing
@@ -192,16 +199,19 @@ def revise_node(state: AgentState) -> dict:
     Return: {"sql": <str>, "iteration": state.iteration + 1, ...}.
     """
     execution = state.execution.render() if state.execution else "ERROR: SQL was not executed."
-    response = llm().invoke([
-        ("system", prompts.REVISE_SYSTEM),
-        ("user", prompts.REVISE_USER.format(
-            schema=state.schema,
-            question=state.question,
-            sql=state.sql,
-            execution=execution,
-            issue=state.verify_issue,
-        )),
-    ])
+    response = llm().invoke(
+        [
+            ("system", prompts.REVISE_SYSTEM),
+            ("user", prompts.REVISE_USER.format(
+                schema=state.schema,
+                question=state.question,
+                sql=state.sql,
+                execution=execution,
+                issue=state.verify_issue,
+            )),
+        ],
+        config=config,
+    )
     sql = _extract_sql(response.content)
     return {
         "sql": sql,
