@@ -70,3 +70,38 @@ Current verification:
 - Prometheus reported the `vllm` scrape target as `up`.
 - Grafana health endpoint reported version `11.3.0`.
 - Dashboard JSON validates with `jq`.
+
+## Phase 3: Agent
+
+Implementation: `agent/graph.py` and `agent/prompts.py`
+
+Agent endpoint: `http://localhost:8001/answer`
+
+Result artifact: `results/phase3_agent_smoke.json`
+
+What was added:
+
+- `generate_sql -> execute -> verify` now routes to `revise` when the verifier returns `ok=false`.
+- `revise` receives the question, schema, previous SQL, execution result, and verifier issue, then loops back to execution.
+- The loop is capped at `MAX_ITERATIONS = 3` total generate/revise attempts.
+- LLM replies are parsed defensively: SQL is extracted from prose/fences, and verifier JSON is extracted from prose/fences.
+
+Smoke test on the H100 VM with the real `Qwen/Qwen3-30B-A3B-Instruct-2507` endpoint:
+
+| Metric | Result |
+|---|---:|
+| Eval questions tested | 5 |
+| SQL executed without runtime error | 5 |
+| Final verifier accepted | 4 |
+| Questions triggering revise | 1 |
+| Questions hitting iteration cap | 1 |
+
+Revise case:
+
+- Question 4, DB `financial`, triggered `verify -> revise`.
+- The verifier rejected the first result with `issue="no data returned"`.
+- The revise node ran twice, but Qwen repeated the same SQL, so the iteration cap stopped the loop at 3 attempts.
+
+Conclusion:
+
+The Phase 3 graph wiring is working: a verifier rejection really routes into `revise`, and the cap prevents infinite loops. The weak point is prompt effectiveness on the no-data aggregate case: the verifier detected a suspicious answer, but revise did not produce a different strategy. For Phase 5/6, this should be measured against execution accuracy and improved by making the revise prompt ask for an explicit alternative join/filter interpretation when the verifier reports empty or null aggregate results.
