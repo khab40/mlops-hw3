@@ -1,5 +1,15 @@
 # Home assignment: LLM inference + o11y
 
+![Version](https://img.shields.io/badge/version-0.1.0-0f766e)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![vLLM](https://img.shields.io/badge/vLLM-Inference-111827)
+![LangGraph](https://img.shields.io/badge/LangGraph-Agent-1f6feb)
+![Langfuse](https://img.shields.io/badge/Langfuse-Tracing-6f42c1)
+![Prometheus](https://img.shields.io/badge/Prometheus-Metrics-E6522C?logo=prometheus&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-Dashboard-F46800?logo=grafana&logoColor=white)
+
 <p align="center">
   <img src="assets/img/github-banner.jpg" alt="Nebius AI PE LLM inference and observability assignment banner">
 </p>
