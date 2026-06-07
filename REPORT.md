@@ -224,3 +224,13 @@ Grafana observations during the eval:
 Conclusion:
 
 The current verify/revise architecture does not earn its keep on this baseline. It creates useful observability and catches questionable outputs, but the revise prompt/model behavior does not convert wrong SQL into correct SQL on the eval set. The immediate quality work should focus on stronger revision instructions, explicit use of gold-like schema evidence in the prompt, and better handling of domain-specific SQL details in `formula_1`, `toxicology`, and `thrombosis_prediction`.
+
+## Phase 6: Load and Serving Bottleneck
+
+Load-test artifact: `results/load_test_rps10_agent_diag.json`
+
+Grafana screenshot: collected manually after adding agent diagnostics to the dashboard.
+
+Experiment note:
+
+saw `latency_p50=48.2s`, `latency_p95=92.4s`, `latency_p99=105.1s`, peak `/answer` in-flight `928`, graph in-flight `40`, and vLLM waiting `0` → hypothesized the serving bottleneck is FastAPI/agent request backlog from unbounded client concurrency plus multi-step sequential LLM calls, not GPU/vLLM saturation → changed Grafana/Prometheus instrumentation to expose `agent_http_requests_in_progress`, graph duration, node p95, outcomes, and agent-vs-vLLM latency → result was Grafana made the root cause visible: requests pile up before/inside the agent while vLLM still has no scheduler queue.
