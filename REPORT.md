@@ -245,22 +245,73 @@ The final serving tuning did not regress eval quality on this 30-question set: t
 
 ## Phase 6: Load and Serving Bottleneck
 
-Load-test artifact: `results/load_test_rps10_agent_diag.json`
+SLO target:
 
-Grafana screenshot: collected manually after adding agent diagnostics to the dashboard.
+> p95 end-to-end agent latency under 5 seconds, 10+ scheduled RPS over a 5-minute window.
+
+Artifacts:
+
+- Baseline diagnostic load run: `results/load_test_rps10_agent_diag.json`
+- Async-threadpool load run: `results/load_test_rps10_async_threadpool.json`
+- Final fast-path load run: `results/load_test_rps10_fast_path.json`
+- Post-tuning eval: `results/eval_after_tuning.json`
+- Grafana screenshots: collected manually while the dashboard showed the agent/vLLM pressure panels reacting to these runs.
+
+Load-test summary:
+
+| Run | Scheduled | Total | OK | Timeouts | HTTP errors | Client errors | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Baseline with diagnostics | 3000 | 2593 | 1138 | 976 | 67 | 412 | 48.2s | 92.4s | 105.1s |
+| Async graph threadpool | 3000 | 2997 | 2769 | 17 | 0 | 211 | 12.9s | 41.9s | 50.8s |
+| Final fast path | 3000 | 3000 | 2997 | 3 | 0 | 0 | 0.88s | 1.72s | 3.23s |
+
+Pressure summary from Grafana/Prometheus:
+
+| Run | Peak `/answer` in-flight | Peak graph in-flight | Peak executor queue | vLLM waiting | vLLM running peak |
+|---|---:|---:|---:|---:|---:|
+| Baseline with diagnostics | 928 | 40 | n/a | 0 | 35 |
+| Async graph threadpool | 396 | 128 | 267 | 0 | 118 |
+| Final fast path | 20 | 20 | 0 | 0 | 21 |
+
+Baseline state:
+
+The first valid 10 RPS run after adding agent diagnostics missed the SLO badly: `latency_p50=48.2s`, `latency_p95=92.4s`, `latency_p99=105.1s`, `ok=1138`, `timeouts=976`, `HTTP 500=67`, and `client_errors=412`. Grafana made the bottleneck visible: `/answer` in-flight reached `928` while graph in-flight capped near `40`, vLLM waiting stayed at `0`, and vLLM request latency was far below the agent's end-to-end latency. That ruled out GPU/vLLM saturation as the first-order cause.
+
+Iteration 1: expose the missing agent bottleneck.
 
 Experiment note:
 
 saw `latency_p50=48.2s`, `latency_p95=92.4s`, `latency_p99=105.1s`, peak `/answer` in-flight `928`, graph in-flight `40`, and vLLM waiting `0` → hypothesized the serving bottleneck is FastAPI/agent request backlog from unbounded client concurrency plus multi-step sequential LLM calls, not GPU/vLLM saturation → changed Grafana/Prometheus instrumentation to expose `agent_http_requests_in_progress`, graph duration, node p95, outcomes, and agent-vs-vLLM latency → result was Grafana made the root cause visible: requests pile up before/inside the agent while vLLM still has no scheduler queue.
 
-Load-test artifact: `results/load_test_rps10_async_threadpool.json`
+Iteration 2: remove FastAPI's implicit sync-threadpool ceiling.
 
 Experiment note:
 
 saw graph in-flight capped at `40`, peak `/answer` in-flight `928`, `ok=1138`, `timeouts=976`, and `latency_p95=92.4s` → hypothesized FastAPI's implicit sync endpoint threadpool was the first concurrency ceiling before vLLM → changed `/answer` to an async endpoint backed by an explicit `AGENT_MAX_WORKERS=128` graph `ThreadPoolExecutor` and added executor queue metrics → result was `ok=2769`, `timeouts=17`, HTTP 500s `0`, `latency_p50=12.9s`, `latency_p95=41.9s`, peak `/answer` in-flight `396`, graph in-flight `128`, executor queued `267`, and vLLM waiting still `0`.
 
-Load-test artifact: `results/load_test_rps10_fast_path.json`
+This improved completion rate and removed HTTP 500s, but the SLO was still missed. The new metrics showed that the executor itself had become the queue: graph in-flight reached the new `128` worker cap, executor queue reached `267`, and vLLM waiting still stayed at `0`.
+
+Iteration 3: reduce per-request work and bound response size.
 
 Experiment note:
 
 saw the async-threadpool run still missed the SLO with `latency_p50=12.9s`, `latency_p95=41.9s`, `latency_p99=50.8s`, `ok=2769`, `timeouts=17`, peak `/answer` in-flight `396`, graph in-flight `128`, executor queued `267`, and vLLM waiting `0` → hypothesized the remaining tail was sequential agent work plus occasional oversized schema/output payloads, not GPU queueing → changed serving to `AGENT_FAST_PATH=true`, skipped verify/revise on the load path, capped generation at `AGENT_MAX_TOKENS=256`, trimmed schema context to `AGENT_SCHEMA_MAX_CHARS=12000`, bounded admission with `AGENT_MAX_INFLIGHT=96` and `AGENT_QUEUE_TIMEOUT_SECONDS=0.25`, and capped SQL response previews with `AGENT_SQL_MAX_ROWS=100` → result was `ok=2997`, `timeouts=3`, `client_errors=0`, `latency_p50=0.88s`, `latency_p95=1.72s`, `latency_p99=3.23s`, peak `/answer` in-flight `20`, graph in-flight `20`, executor queued `0`, vLLM waiting `0`, meeting the p95 < 5s target.
+
+Final state:
+
+The final configuration met the latency target. The load driver scheduled all `3000` requests over the 300-second window, with `2997` successful responses and only `3` timeouts. Driver-reported achieved RPS was `8.46` because the wall-clock includes tail/drain time, but the scheduler still issued the target 10 RPS during the load window. Grafana showed no hidden queue after tuning: `/answer` in-flight peaked at `20`, graph in-flight peaked at `20`, executor queue stayed at `0`, and vLLM waiting stayed at `0`.
+
+Quality check:
+
+The final fast path intentionally disables verify/revise for the load path, so I reran the same 30-question eval set after tuning.
+
+| Metric | Baseline eval | After tuning |
+|---|---:|---:|
+| Correct final answers | 10 / 30 | 10 / 30 |
+| Overall execution accuracy | 33.3% | 33.3% |
+| Agent errors | 0 | 0 |
+| Final SQL execution errors | 0 | 0 |
+| Questions triggering revise | 11 | 0 |
+| Wall-clock eval time | 57.9s | 28.1s |
+
+Quality survived on this eval set: there were `0` question-level regressions and `0` improvements. The same 10 questions remained correct. This is consistent with the Phase 5 finding that the baseline verify/revise loop triggered on 11 questions but did not turn any initially wrong answer into a correct final answer. The final tradeoff is therefore clear: for the measured serving SLO, skipping verify/revise removed latency without reducing execution accuracy on the provided eval set.
