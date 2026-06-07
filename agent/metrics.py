@@ -56,6 +56,14 @@ GRAPH_IN_PROGRESS = Gauge(
     "agent_graph_invocations_in_progress",
     "LangGraph invocations currently running.",
 )
+GRAPH_EXECUTOR_MAX_WORKERS = Gauge(
+    "agent_graph_executor_max_workers",
+    "Maximum worker threads configured for graph invocation.",
+)
+GRAPH_EXECUTOR_QUEUE_DEPTH = Gauge(
+    "agent_graph_executor_queue_depth",
+    "Approximate number of graph invocations waiting in the executor queue.",
+)
 GRAPH_DURATION = Histogram(
     "agent_graph_invocation_duration_seconds",
     "End-to-end LangGraph invocation duration.",

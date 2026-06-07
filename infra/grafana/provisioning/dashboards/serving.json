@@ -782,6 +782,24 @@
           "expr": "sum(vllm:num_requests_waiting)",
           "legendFormat": "vLLM waiting",
           "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(agent_graph_executor_queue_depth)",
+          "legendFormat": "executor queued",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(agent_graph_executor_max_workers)",
+          "legendFormat": "executor max workers",
+          "refId": "F"
         }
       ],
       "title": "Agent health and pressure",

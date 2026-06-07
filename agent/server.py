@@ -8,8 +8,11 @@ agent's final SQL, the result rows, and per-iteration history.
 """
 from __future__ import annotations
 
+import asyncio
+import atexit
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from dotenv import load_dotenv
@@ -27,6 +30,8 @@ from agent.metrics import (  # noqa: E402
     ANSWER_OUTCOMES_TOTAL,
     GRAPH_DURATION,
     GRAPH_ERRORS_TOTAL,
+    GRAPH_EXECUTOR_MAX_WORKERS,
+    GRAPH_EXECUTOR_QUEUE_DEPTH,
     GRAPH_IN_PROGRESS,
     HTTP_IN_PROGRESS,
     HTTP_REQUEST_DURATION,
@@ -43,10 +48,27 @@ if os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY
 
     _lf_handler = CallbackHandler()
 
+AGENT_MAX_WORKERS = int(os.environ.get("AGENT_MAX_WORKERS", "128"))
+_graph_executor = ThreadPoolExecutor(
+    max_workers=AGENT_MAX_WORKERS,
+    thread_name_prefix="agent-graph",
+)
+atexit.register(_graph_executor.shutdown, wait=False, cancel_futures=True)
 
 app = FastAPI()
 app.mount("/metrics", make_asgi_app())
 AGENT_HEALTH_UP.set(1)
+GRAPH_EXECUTOR_MAX_WORKERS.set(AGENT_MAX_WORKERS)
+
+
+def _executor_queue_depth() -> int:
+    queue = getattr(_graph_executor, "_work_queue", None)
+    if queue is None:
+        return 0
+    try:
+        return int(queue.qsize())
+    except NotImplementedError:
+        return 0
 
 
 @app.middleware("http")
@@ -88,6 +110,21 @@ class AnswerResponse(BaseModel):
     history: list[dict[str, Any]] = []
 
 
+def _run_graph(state: AgentState, config: dict[str, Any]) -> dict[str, Any]:
+    start = time.perf_counter()
+    GRAPH_IN_PROGRESS.inc()
+    try:
+        final = graph.invoke(state, config=config)
+    except Exception as e:  # noqa: BLE001
+        GRAPH_ERRORS_TOTAL.labels(error_type=type(e).__name__).inc()
+        GRAPH_DURATION.labels(status="error").observe(time.perf_counter() - start)
+        raise
+    finally:
+        GRAPH_IN_PROGRESS.dec()
+    GRAPH_DURATION.labels(status="ok").observe(time.perf_counter() - start)
+    return final
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     AGENT_HEALTH_UP.set(1)
@@ -95,7 +132,7 @@ def health() -> dict[str, str]:
 
 
 @app.post("/answer", response_model=AnswerResponse)
-def answer(req: AnswerRequest) -> AnswerResponse:
+async def answer(req: AnswerRequest) -> AnswerResponse:
     state = AgentState(question=req.question, db_id=req.db)
     trace_tags = ["agent", *[f"{key}:{value}" for key, value in sorted(req.tags.items())]]
     config: dict[str, Any] = {
@@ -104,17 +141,14 @@ def answer(req: AnswerRequest) -> AnswerResponse:
         "tags": trace_tags,
         "run_name": "text-to-sql-agent",
     }
-    start = time.perf_counter()
-    GRAPH_IN_PROGRESS.inc()
     try:
-        final = graph.invoke(state, config=config)
+        GRAPH_EXECUTOR_QUEUE_DEPTH.set(_executor_queue_depth())
+        loop = asyncio.get_running_loop()
+        final = await loop.run_in_executor(_graph_executor, _run_graph, state, config)
     except Exception as e:  # noqa: BLE001
-        GRAPH_ERRORS_TOTAL.labels(error_type=type(e).__name__).inc()
-        GRAPH_DURATION.labels(status="error").observe(time.perf_counter() - start)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
     finally:
-        GRAPH_IN_PROGRESS.dec()
-    GRAPH_DURATION.labels(status="ok").observe(time.perf_counter() - start)
+        GRAPH_EXECUTOR_QUEUE_DEPTH.set(_executor_queue_depth())
 
     sql = final.get("sql", "")
     iteration = final.get("iteration", 0)
