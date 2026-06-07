@@ -234,3 +234,9 @@ Grafana screenshot: collected manually after adding agent diagnostics to the das
 Experiment note:
 
 saw `latency_p50=48.2s`, `latency_p95=92.4s`, `latency_p99=105.1s`, peak `/answer` in-flight `928`, graph in-flight `40`, and vLLM waiting `0` → hypothesized the serving bottleneck is FastAPI/agent request backlog from unbounded client concurrency plus multi-step sequential LLM calls, not GPU/vLLM saturation → changed Grafana/Prometheus instrumentation to expose `agent_http_requests_in_progress`, graph duration, node p95, outcomes, and agent-vs-vLLM latency → result was Grafana made the root cause visible: requests pile up before/inside the agent while vLLM still has no scheduler queue.
+
+Load-test artifact: `results/load_test_rps10_async_threadpool.json`
+
+Experiment note:
+
+saw graph in-flight capped at `40`, peak `/answer` in-flight `928`, `ok=1138`, `timeouts=976`, and `latency_p95=92.4s` → hypothesized FastAPI's implicit sync endpoint threadpool was the first concurrency ceiling before vLLM → changed `/answer` to an async endpoint backed by an explicit `AGENT_MAX_WORKERS=128` graph `ThreadPoolExecutor` and added executor queue metrics → result was `ok=2769`, `timeouts=17`, HTTP 500s `0`, `latency_p50=12.9s`, `latency_p95=41.9s`, peak `/answer` in-flight `396`, graph in-flight `128`, executor queued `267`, and vLLM waiting still `0`.
