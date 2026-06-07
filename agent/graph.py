@@ -28,6 +28,7 @@ from langgraph.graph import END, START, StateGraph
 
 from agent import prompts
 from agent.execution import ExecutionResult, execute_sql
+from agent.metrics import timed_node
 from agent.schema import render_schema
 
 # Total generate + revise calls before the loop is forced to stop.
@@ -70,7 +71,8 @@ def llm() -> ChatOpenAI:
 
 def _attach_schema(state: AgentState) -> dict:
     """Provided. Render the DB schema once at the start of the run."""
-    return {"schema": render_schema(state.db_id)}
+    with timed_node("attach_schema"):
+        return {"schema": render_schema(state.db_id)}
 
 
 def _extract_sql(text: str) -> str:
@@ -123,27 +125,29 @@ def generate_sql_node(state: AgentState, config: RunnableConfig) -> dict:
     This node is wired and ready; fill in GENERATE_SQL_SYSTEM / GENERATE_SQL_USER
     in prompts.py to make it produce real queries.
     """
-    response = llm().invoke(
-        [
-            ("system", prompts.GENERATE_SQL_SYSTEM),
-            ("user", prompts.GENERATE_SQL_USER.format(
-                schema=state.schema,
-                question=state.question,
-            )),
-        ],
-        config=config,
-    )
-    sql = _extract_sql(response.content)
-    return {
-        "sql": sql,
-        "iteration": state.iteration + 1,
-        "history": state.history + [{"node": "generate_sql", "sql": sql}],
-    }
+    with timed_node("generate_sql"):
+        response = llm().invoke(
+            [
+                ("system", prompts.GENERATE_SQL_SYSTEM),
+                ("user", prompts.GENERATE_SQL_USER.format(
+                    schema=state.schema,
+                    question=state.question,
+                )),
+            ],
+            config=config,
+        )
+        sql = _extract_sql(response.content)
+        return {
+            "sql": sql,
+            "iteration": state.iteration + 1,
+            "history": state.history + [{"node": "generate_sql", "sql": sql}],
+        }
 
 
 def execute_node(state: AgentState) -> dict:
     """Provided. Runs the SQL and stores the result."""
-    return {"execution": execute_sql(state.db_id, state.sql)}
+    with timed_node("execute"):
+        return {"execution": execute_sql(state.db_id, state.sql)}
 
 
 def verify_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -159,33 +163,34 @@ def verify_node(state: AgentState, config: RunnableConfig) -> dict:
     What counts as "not plausible" is yours to define - see the Phase 3 targets
     in the README.
     """
-    execution = state.execution.render() if state.execution else "ERROR: SQL was not executed."
-    response = llm().invoke(
-        [
-            ("system", prompts.VERIFY_SYSTEM),
-            ("user", prompts.VERIFY_USER.format(
-                question=state.question,
-                sql=state.sql,
-                execution=execution,
-            )),
-        ],
-        config=config,
-    )
-    parsed = _extract_json_object(response.content)
-    ok = bool(parsed.get("ok", False))
-    issue = str(parsed.get("issue") or "").strip()
-    if not issue:
-        issue = "Verifier accepted the result." if ok else "Verifier rejected the result without a reason."
-    return {
-        "verify_ok": ok,
-        "verify_issue": issue,
-        "history": state.history + [{
-            "node": "verify",
-            "ok": ok,
-            "issue": issue,
-            "raw": response.content,
-        }],
-    }
+    with timed_node("verify"):
+        execution = state.execution.render() if state.execution else "ERROR: SQL was not executed."
+        response = llm().invoke(
+            [
+                ("system", prompts.VERIFY_SYSTEM),
+                ("user", prompts.VERIFY_USER.format(
+                    question=state.question,
+                    sql=state.sql,
+                    execution=execution,
+                )),
+            ],
+            config=config,
+        )
+        parsed = _extract_json_object(response.content)
+        ok = bool(parsed.get("ok", False))
+        issue = str(parsed.get("issue") or "").strip()
+        if not issue:
+            issue = "Verifier accepted the result." if ok else "Verifier rejected the result without a reason."
+        return {
+            "verify_ok": ok,
+            "verify_issue": issue,
+            "history": state.history + [{
+                "node": "verify",
+                "ok": ok,
+                "issue": issue,
+                "raw": response.content,
+            }],
+        }
 
 
 def revise_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -198,30 +203,31 @@ def revise_node(state: AgentState, config: RunnableConfig) -> dict:
 
     Return: {"sql": <str>, "iteration": state.iteration + 1, ...}.
     """
-    execution = state.execution.render() if state.execution else "ERROR: SQL was not executed."
-    response = llm().invoke(
-        [
-            ("system", prompts.REVISE_SYSTEM),
-            ("user", prompts.REVISE_USER.format(
-                schema=state.schema,
-                question=state.question,
-                sql=state.sql,
-                execution=execution,
-                issue=state.verify_issue,
-            )),
-        ],
-        config=config,
-    )
-    sql = _extract_sql(response.content)
-    return {
-        "sql": sql,
-        "iteration": state.iteration + 1,
-        "history": state.history + [{
-            "node": "revise",
-            "issue": state.verify_issue,
+    with timed_node("revise"):
+        execution = state.execution.render() if state.execution else "ERROR: SQL was not executed."
+        response = llm().invoke(
+            [
+                ("system", prompts.REVISE_SYSTEM),
+                ("user", prompts.REVISE_USER.format(
+                    schema=state.schema,
+                    question=state.question,
+                    sql=state.sql,
+                    execution=execution,
+                    issue=state.verify_issue,
+                )),
+            ],
+            config=config,
+        )
+        sql = _extract_sql(response.content)
+        return {
             "sql": sql,
-        }],
-    }
+            "iteration": state.iteration + 1,
+            "history": state.history + [{
+                "node": "revise",
+                "issue": state.verify_issue,
+                "sql": sql,
+            }],
+        }
 
 
 def route_after_verify(state: AgentState) -> str:
