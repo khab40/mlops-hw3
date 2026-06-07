@@ -225,6 +225,24 @@ Conclusion:
 
 The current verify/revise architecture does not earn its keep on this baseline. It creates useful observability and catches questionable outputs, but the revise prompt/model behavior does not convert wrong SQL into correct SQL on the eval set. The immediate quality work should focus on stronger revision instructions, explicit use of gold-like schema evidence in the prompt, and better handling of domain-specific SQL details in `formula_1`, `toxicology`, and `thrombosis_prediction`.
 
+Post-tuning eval:
+
+Result artifact: `results/eval_after_tuning.json`
+
+| Metric | Baseline | After tuning |
+|---|---:|---:|
+| Eval questions | 30 | 30 |
+| Correct final answers | 10 | 10 |
+| Overall execution accuracy | 33.3% | 33.3% |
+| Agent errors | 0 | 0 |
+| Final SQL execution errors | 0 | 0 |
+| Questions triggering revise | 11 | 0 |
+| Wall-clock eval time | 57.9s | 28.1s |
+| Average per-question latency | 1.84s | 0.86s |
+| Max per-question latency | 7.75s | 1.49s |
+
+The final serving tuning did not regress eval quality on this 30-question set: there were 0 question-level regressions and 0 improvements. The same 10 questions remained correct, and the per-database accuracy distribution was unchanged. The quality result is unsurprising because the earlier baseline showed the verify/revise loop did not recover any initially wrong answer; disabling it removed latency without changing final execution accuracy on this eval set.
+
 ## Phase 6: Load and Serving Bottleneck
 
 Load-test artifact: `results/load_test_rps10_agent_diag.json`
