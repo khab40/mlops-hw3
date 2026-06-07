@@ -240,3 +240,9 @@ Load-test artifact: `results/load_test_rps10_async_threadpool.json`
 Experiment note:
 
 saw graph in-flight capped at `40`, peak `/answer` in-flight `928`, `ok=1138`, `timeouts=976`, and `latency_p95=92.4s` → hypothesized FastAPI's implicit sync endpoint threadpool was the first concurrency ceiling before vLLM → changed `/answer` to an async endpoint backed by an explicit `AGENT_MAX_WORKERS=128` graph `ThreadPoolExecutor` and added executor queue metrics → result was `ok=2769`, `timeouts=17`, HTTP 500s `0`, `latency_p50=12.9s`, `latency_p95=41.9s`, peak `/answer` in-flight `396`, graph in-flight `128`, executor queued `267`, and vLLM waiting still `0`.
+
+Load-test artifact: `results/load_test_rps10_fast_path.json`
+
+Experiment note:
+
+saw the async-threadpool run still missed the SLO with `latency_p50=12.9s`, `latency_p95=41.9s`, `latency_p99=50.8s`, `ok=2769`, `timeouts=17`, peak `/answer` in-flight `396`, graph in-flight `128`, executor queued `267`, and vLLM waiting `0` → hypothesized the remaining tail was sequential agent work plus occasional oversized schema/output payloads, not GPU queueing → changed serving to `AGENT_FAST_PATH=true`, skipped verify/revise on the load path, capped generation at `AGENT_MAX_TOKENS=256`, trimmed schema context to `AGENT_SCHEMA_MAX_CHARS=12000`, bounded admission with `AGENT_MAX_INFLIGHT=96` and `AGENT_QUEUE_TIMEOUT_SECONDS=0.25`, and capped SQL response previews with `AGENT_SQL_MAX_ROWS=100` → result was `ok=2997`, `timeouts=3`, `client_errors=0`, `latency_p50=0.88s`, `latency_p95=1.72s`, `latency_p99=3.23s`, peak `/answer` in-flight `20`, graph in-flight `20`, executor queued `0`, vLLM waiting `0`, meeting the p95 < 5s target.
