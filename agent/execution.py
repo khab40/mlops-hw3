@@ -6,10 +6,13 @@ to decide whether the answer looks plausible.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 
 from agent.schema import db_path
+
+SQL_MAX_ROWS = int(os.environ.get("AGENT_SQL_MAX_ROWS", "100"))
 
 
 @dataclass
@@ -34,7 +37,7 @@ class ExecutionResult:
         return f"OK: {self.row_count} rows.\nCOLUMNS: {cols}\nFIRST ROWS:\n{preview}{more}"
 
 
-def execute_sql(db_id: str, sql: str, timeout_seconds: float = 5.0) -> ExecutionResult:
+def execute_sql(db_id: str, sql: str, timeout_seconds: float = 5.0, max_rows: int = SQL_MAX_ROWS) -> ExecutionResult:
     """Run SQL against db_id's sqlite, return result or error."""
     path = db_path(db_id)
     try:
@@ -45,7 +48,11 @@ def execute_sql(db_id: str, sql: str, timeout_seconds: float = 5.0) -> Execution
         ) as conn:
             cur = conn.execute(sql)
             cols = [d[0] for d in cur.description] if cur.description else []
-            rows = cur.fetchall()
-            return ExecutionResult(ok=True, rows=rows, columns=cols, row_count=len(rows))
+            rows = cur.fetchmany(max_rows + 1)
+            truncated = len(rows) > max_rows
+            if truncated:
+                rows = rows[:max_rows]
+            row_count = len(rows) + (1 if truncated else 0)
+            return ExecutionResult(ok=True, rows=rows, columns=cols, row_count=row_count)
     except Exception as e:  # noqa: BLE001
         return ExecutionResult(ok=False, error=f"{type(e).__name__}: {e}")
