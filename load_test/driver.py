@@ -80,32 +80,46 @@ async def drive(args: argparse.Namespace) -> None:
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
         # let in-flight finish (cap drain at 60s)
+        pending_count = 0
         if tasks:
-            await asyncio.wait(tasks, timeout=60.0)
+            _, pending = await asyncio.wait(tasks, timeout=60.0)
+            pending_count = len(pending)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         wall = time.monotonic() - start
 
     latencies = sorted(r["latency_seconds"] for r in results if r["status"] == "ok")
 
-    def pct(p: float) -> float:
+    def pct(p: float) -> float | None:
         if not latencies:
-            return float("nan")
+            return None
         k = int(round(p * (len(latencies) - 1)))
         return latencies[k]
+
+    error_counts: dict[str, int] = {}
+    for row in results:
+        if row["status"] != "ok" and row.get("error"):
+            error_counts[row["error"]] = error_counts.get(row["error"], 0) + 1
 
     summary = {
         "requested_rps": args.rps,
         "duration_seconds": args.duration,
         "wall_clock_seconds": wall,
+        "scheduled_requests": len(tasks),
         "total_requests": len(results),
         "achieved_rps": (len(results) / wall) if wall > 0 else 0.0,
         "ok": sum(1 for r in results if r["status"] == "ok"),
         "timeouts": sum(1 for r in results if r["status"] == "timeout"),
         "http_errors": sum(1 for r in results if r["status"] == "http_error"),
         "client_errors": sum(1 for r in results if r["status"] == "client_error"),
+        "cancelled_after_drain_timeout": pending_count,
         "latency_p50": pct(0.50),
         "latency_p95": pct(0.95),
         "latency_p99": pct(0.99),
-        "latency_max": latencies[-1] if latencies else float("nan"),
+        "latency_max": latencies[-1] if latencies else None,
+        "error_counts": error_counts,
     }
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
