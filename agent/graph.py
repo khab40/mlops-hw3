@@ -29,7 +29,7 @@ from langgraph.graph import END, START, StateGraph
 from agent import prompts
 from agent.execution import ExecutionResult, execute_sql
 from agent.metrics import timed_node
-from agent.schema import render_schema
+from agent.schema import render_schema, trim_schema_for_question
 
 # Total generate + revise calls before the loop is forced to stop.
 # 3-5 is a reasonable range; tune it as part of Phase 3.
@@ -40,6 +40,7 @@ VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 # vLLM ignores the key, but a hosted OpenAI-compatible provider needs a real one.
 # Lets you point the agent at e.g. OpenAI while iterating without a running vLLM.
 LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "not-needed")
+LLM_MAX_TOKENS = int(os.environ.get("AGENT_MAX_TOKENS", "256"))
 
 
 @dataclass
@@ -64,6 +65,7 @@ def llm() -> ChatOpenAI:
         base_url=VLLM_BASE_URL,
         api_key=LLM_API_KEY,
         temperature=0.0,
+        max_tokens=LLM_MAX_TOKENS,
     )
 
 
@@ -72,7 +74,8 @@ def llm() -> ChatOpenAI:
 def _attach_schema(state: AgentState) -> dict:
     """Provided. Render the DB schema once at the start of the run."""
     with timed_node("attach_schema"):
-        return {"schema": render_schema(state.db_id)}
+        schema = render_schema(state.db_id)
+        return {"schema": trim_schema_for_question(schema, state.question)}
 
 
 def _extract_sql(text: str) -> str:
@@ -265,3 +268,25 @@ def build_graph():
 
 
 graph = build_graph()
+
+
+def run_fast_path(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """Latency-optimized serving path: generate once, execute once, skip verify/revise."""
+    state.schema = _attach_schema(state)["schema"]
+
+    generated = generate_sql_node(state, config)
+    state.sql = generated["sql"]
+    state.iteration = generated["iteration"]
+    state.history = generated["history"]
+
+    executed = execute_node(state)
+    state.execution = executed["execution"]
+    return {
+        "schema": state.schema,
+        "sql": state.sql,
+        "iteration": state.iteration,
+        "history": state.history,
+        "execution": state.execution,
+        "verify_ok": True,
+        "verify_issue": "fast path skipped verifier",
+    }

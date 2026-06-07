@@ -23,7 +23,7 @@ from starlette.requests import Request
 
 load_dotenv()
 
-from agent.graph import AgentState, graph  # noqa: E402
+from agent.graph import AgentState, graph, run_fast_path  # noqa: E402
 from agent.metrics import (  # noqa: E402
     AGENT_HEALTH_UP,
     ANSWER_ITERATIONS,
@@ -49,10 +49,14 @@ if os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY
     _lf_handler = CallbackHandler()
 
 AGENT_MAX_WORKERS = int(os.environ.get("AGENT_MAX_WORKERS", "128"))
+AGENT_FAST_PATH = os.environ.get("AGENT_FAST_PATH", "false").lower() in {"1", "true", "yes"}
+AGENT_MAX_INFLIGHT = int(os.environ.get("AGENT_MAX_INFLIGHT", str(AGENT_MAX_WORKERS)))
+AGENT_QUEUE_TIMEOUT_SECONDS = float(os.environ.get("AGENT_QUEUE_TIMEOUT_SECONDS", "0.25"))
 _graph_executor = ThreadPoolExecutor(
     max_workers=AGENT_MAX_WORKERS,
     thread_name_prefix="agent-graph",
 )
+_admission = asyncio.Semaphore(AGENT_MAX_INFLIGHT)
 atexit.register(_graph_executor.shutdown, wait=False, cancel_futures=True)
 
 app = FastAPI()
@@ -114,7 +118,7 @@ def _run_graph(state: AgentState, config: dict[str, Any]) -> dict[str, Any]:
     start = time.perf_counter()
     GRAPH_IN_PROGRESS.inc()
     try:
-        final = graph.invoke(state, config=config)
+        final = run_fast_path(state, config) if AGENT_FAST_PATH else graph.invoke(state, config=config)
     except Exception as e:  # noqa: BLE001
         GRAPH_ERRORS_TOTAL.labels(error_type=type(e).__name__).inc()
         GRAPH_DURATION.labels(status="error").observe(time.perf_counter() - start)
@@ -141,13 +145,20 @@ async def answer(req: AnswerRequest) -> AnswerResponse:
         "tags": trace_tags,
         "run_name": "text-to-sql-agent",
     }
+    admitted = False
     try:
+        await asyncio.wait_for(_admission.acquire(), timeout=AGENT_QUEUE_TIMEOUT_SECONDS)
+        admitted = True
         GRAPH_EXECUTOR_QUEUE_DEPTH.set(_executor_queue_depth())
         loop = asyncio.get_running_loop()
         final = await loop.run_in_executor(_graph_executor, _run_graph, state, config)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="agent overloaded")
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
     finally:
+        if admitted:
+            _admission.release()
         GRAPH_EXECUTOR_QUEUE_DEPTH.set(_executor_queue_depth())
 
     sql = final.get("sql", "")

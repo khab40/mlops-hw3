@@ -7,12 +7,15 @@ the PRAGMA introspection here or the SQL the model emits later.
 """
 from __future__ import annotations
 
+import os
+import re
 import sqlite3
 from functools import lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_DIR = ROOT / "data" / "bird"
+SCHEMA_MAX_CHARS = int(os.environ.get("AGENT_SCHEMA_MAX_CHARS", "12000"))
 
 
 def db_path(db_id: str) -> Path:
@@ -58,6 +61,37 @@ def render_schema(db_id: str) -> str:
                 col_lines.append(f"  FOREIGN KEY ({_q(fk[3])}){ref}")
             parts.append(",\n".join(col_lines))
             parts.append(");")
+    return "\n".join(parts)
+
+
+def _question_terms(question: str) -> set[str]:
+    return {t for t in re.findall(r"[a-zA-Z_][a-zA-Z0-9_]+", question.lower()) if len(t) > 2}
+
+
+def trim_schema_for_question(schema: str, question: str, max_chars: int = SCHEMA_MAX_CHARS) -> str:
+    """Keep prompt context bounded by prioritizing tables that match question terms."""
+    if max_chars <= 0 or len(schema) <= max_chars:
+        return schema
+
+    chunks = re.split(r"\n(?=CREATE TABLE )", schema)
+    header = chunks[0].split("\nCREATE TABLE ", 1)[0].strip()
+    table_chunks = [c for c in chunks if c.startswith("CREATE TABLE ")]
+    terms = _question_terms(question)
+
+    def score(chunk: str) -> tuple[int, int]:
+        lowered = chunk.lower()
+        hits = sum(1 for term in terms if term in lowered)
+        return hits, -len(chunk)
+
+    ordered = sorted(table_chunks, key=score, reverse=True)
+    parts = [header, "-- Schema trimmed for serving latency; tables most relevant to the question are shown first."]
+    size = sum(len(p) + 1 for p in parts)
+    for chunk in ordered:
+        added = len(chunk) + 1
+        if size + added > max_chars:
+            continue
+        parts.append(chunk)
+        size += added
     return "\n".join(parts)
 
 
