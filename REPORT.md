@@ -65,8 +65,8 @@ Target SLO: p95 end-to-end agent latency under 5 seconds at 10+ scheduled RPS ov
 | Run | Scheduled | Total | OK | Timeouts | HTTP errors | Client errors | p50 | p95 | p99 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | Baseline diagnostics | 3000 | 2593 | 1138 | 976 | 67 | 412 | 48.2s | 92.4s | 105.1s |
-| Async graph threadpool | 3000 | 2997 | 2769 | 17 | 0 | 211 | 12.9s | 41.9s | 50.8s |
-| Final fast path | 3000 | 3000 | 2997 | 3 | 0 | 0 | 0.88s | 1.72s | 3.23s |
+| Fast path with tracing/value hints | 3000 | 2995 | 59 | 100 | 2836 | 0 | 21.3s | 95.4s | 103.2s |
+| Final fast path, no tracing/no value hints | 3000 | 3000 | 2995 | 5 | 0 | 0 | 0.87s | 1.92s | 3.71s |
 
 Pressure observed in Grafana/Prometheus:
 
@@ -74,28 +74,29 @@ Pressure observed in Grafana/Prometheus:
 |---|---:|---:|---:|---:|---:|
 | Baseline diagnostics | 928 | 40 | n/a | 0 | 35 |
 | Async graph threadpool | 396 | 128 | 267 | 0 | 118 |
-| Final fast path | 20 | 20 | 0 | 0 | 21 |
+| Failed traced fast path | 99 | 96 | 0 | 0 | 28 |
+| Final fast path | low double digits | low double digits | 0 | 0 | no sustained waiting |
 
 Iteration log:
 
 1. saw `latency_p50=48.2s`, `latency_p95=92.4s`, `latency_p99=105.1s`, peak `/answer` in-flight `928`, graph in-flight `40`, and vLLM waiting `0` -> hypothesized the bottleneck was FastAPI/agent backlog from unbounded client concurrency plus multi-step sequential LLM calls, not GPU saturation -> changed Grafana/Prometheus instrumentation to expose agent in-flight requests, graph duration, node p95, outcomes, and agent-vs-vLLM latency -> result was Grafana made the root cause visible: requests piled up before/inside the agent while vLLM had no scheduler queue.
-2. saw graph in-flight capped at `40`, peak `/answer` in-flight `928`, `ok=1138`, `timeouts=976`, and `latency_p95=92.4s` -> hypothesized FastAPI's implicit sync endpoint threadpool was the first concurrency ceiling -> changed `/answer` to an async endpoint backed by `AGENT_MAX_WORKERS=128` and added executor queue metrics -> result was `ok=2769`, `timeouts=17`, HTTP 500s `0`, `latency_p50=12.9s`, `latency_p95=41.9s`, graph in-flight `128`, executor queued `267`, and vLLM waiting still `0`.
-3. saw the async-threadpool run still missed the SLO with `latency_p95=41.9s`, executor queued `267`, and vLLM waiting `0` -> hypothesized the remaining tail was sequential agent work plus oversized schema/output payloads, not GPU queueing -> changed serving to `AGENT_FAST_PATH=true`, capped generation at `256` tokens, trimmed schema to `12000` chars, bounded admission with `AGENT_MAX_INFLIGHT=96` and `AGENT_QUEUE_TIMEOUT_SECONDS=0.25`, and capped SQL preview rows at `100` -> result was `ok=2997`, `timeouts=3`, `client_errors=0`, `latency_p50=0.88s`, `latency_p95=1.72s`, `latency_p99=3.23s`, executor queue `0`, and the p95 < 5s SLO was met.
+2. saw graph in-flight capped at `40`, peak `/answer` in-flight `928`, `ok=1138`, `timeouts=976`, and `latency_p95=92.4s` -> hypothesized FastAPI's implicit sync endpoint threadpool was the first concurrency ceiling -> changed `/answer` to an async endpoint backed by explicit graph workers and added executor queue metrics -> result was higher throughput, but the graph still spent too much time doing sequential multi-node LLM work.
+3. saw the first fast-path load run still fail with `ok=59`, HTTP 503s `2836`, `latency_p95=95.4s`, `/answer` in-flight near the `96` admission cap, executor queue `0`, and vLLM waiting `0` -> traced the bottleneck to serving-side overhead, especially Langfuse callbacks under load and exact value-hint scans in the fast path -> disabled Langfuse for load serving, kept compact domain aliases, skipped value hints only in `run_fast_path`, capped generation at `256` tokens, trimmed schemas to `12000` chars, bounded admission with `AGENT_MAX_INFLIGHT=96`, and capped SQL preview rows at `100` -> result was `ok=2995`, `timeouts=5`, HTTP errors `0`, `latency_p50=0.87s`, `latency_p95=1.92s`, `latency_p99=3.71s`, executor queue `0`, and the p95 < 5s SLO was met.
 
-The before/after Grafana evidence is saved as `screenshots/grafana_before.png` and `screenshots/grafana_after.png`. The final run scheduled all 3000 requests over the 300-second load window; driver-reported achieved RPS was 8.46 because wall-clock time included tail/drain, but the scheduler issued 10 RPS during the load window.
+The before/after Grafana evidence is saved as `screenshots/grafana_before.png` and `screenshots/grafana_after.png`. The final run scheduled all 3000 requests over the 300-second load window; driver-reported achieved RPS was 8.45 because wall-clock time included tail/drain, but the scheduler issued 10 RPS during the load window.
 
 After tuning, I reran the eval set and saved it to `results/eval_after_tuning.json`.
 
 | Metric | Baseline | After tuning |
 |---|---:|---:|
-| Correct final answers | 10 / 30 | 10 / 30 |
-| Overall execution accuracy | 33.3% | 33.3% |
-| Agent errors | 0 | 0 |
-| Final SQL execution errors | 0 | 0 |
-| Questions triggering revise | 11 | 0 |
-| Wall-clock eval time | 57.9s | 28.1s |
+| Correct final answers | 17 / 30 | 11 / 30 |
+| Overall execution accuracy | 56.7% | 36.7% |
+| Agent errors | 0 | 2 |
+| Final SQL execution errors | 0 | 2 |
+| Questions triggering revise | 12 | 0 |
+| Wall-clock eval time | 63.0s | 23.9s |
 
-Quality survived the serving changes on this eval set: there were 0 question-level regressions and 0 improvements. The same 10 questions remained correct.
+The SLO mode is a throughput/latency mode, not the best quality mode. It removed verifier/reviser calls, cut eval wall time from `63.0s` to `23.9s`, and met the load SLO, but it regressed six questions and improved none against the full graph. Two of the fast-path failures were SQL execution errors that the full verifier path rejects and revises.
 
 ## Agent Value
 
