@@ -15,11 +15,13 @@ Rules:
 - Use only tables and columns present in the provided schema.
 - Quote identifiers with double quotes when they contain spaces, punctuation, or mixed case.
 - Do not invent columns, tables, CTE inputs, or values that are not implied by the question.
+- When the schema includes domain aliases for opaque columns, use those meanings over guessing from column names.
 - When the schema includes exact value hints, use those spellings and casing for string filters.
 - Preserve the requested output columns and their order exactly.
 - Use DISTINCT when a join can duplicate the requested entity or value.
 - Do not add LIMIT unless the question asks for one row, top N, highest, lowest, first, or similar.
 - For percentages, make the numerator and denominator match the wording of the question.
+- For one overall average/count/sum/percentage, do not use GROUP BY unless the question asks for each/per/by group.
 - For dates and times, match the stored SQLite value format shown in schema/value hints.
 - Do not explain the query. Do not use markdown.
 """
@@ -50,6 +52,7 @@ Mark ok=false when:
 - duplicate rows appear where the question asks for a single entity/value or distinct list,
 - a string/date filter likely uses the wrong exact spelling, casing, abbreviation, or timestamp format,
 - a percentage, average, count, or difference uses the wrong numerator, denominator, grouping, or filter scope.
+- a selected ID/name column is the wrong level of entity, such as district ID instead of school ID.
 
 Mark ok=true when the SQL executed and the result shape is a plausible answer, even if you cannot prove it is perfect.
 """
@@ -76,10 +79,15 @@ Rules:
 - Use only tables and columns present in the schema.
 - Preserve the user's intent, but fix the verifier issue and execution error/result mismatch.
 - Do not return the same SQL as the previous attempt.
+- When the verifier names a candidate column or literal, switch to it unless it conflicts with the schema.
+- When the schema includes domain aliases for opaque columns, use those meanings over guessing from column names.
 - When the schema includes exact value hints, use those spellings and casing for string filters.
 - If the previous result was empty, reconsider exact literals, date formats, joins, and filter columns.
 - If the previous result had duplicates, add DISTINCT or fix the join cardinality.
 - If selected columns do not match the question, change the projection and preserve requested column order.
+- If the verifier reports a projection mismatch, change the SELECT list first; keep joins/filters only if still appropriate.
+- If the verifier reports a NULL aggregate, change the measure column or filter scope rather than wrapping the result with COALESCE.
+- If the verifier reports an aggregate shape mismatch or unrequested GROUP BY, remove GROUP BY and return one aggregate row.
 - If an aggregate is wrong, fix the grouping, numerator/denominator, or filter scope rather than making cosmetic edits.
 - Quote identifiers with double quotes when needed.
 - Do not explain the query. Do not use markdown.

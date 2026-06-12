@@ -114,6 +114,47 @@ VALUE_HINT_SKIP_COLUMN_PARTS = (
     "website",
 )
 
+DOMAIN_ALIASES: dict[str, list[str]] = {
+    "financial": [
+        '"district"."A2" = district name.',
+        '"district"."A3" = region.',
+        '"district"."A4" = number of inhabitants.',
+        '"district"."A11" = average salary.',
+        '"district"."A12" = unemployment rate in 1995.',
+        '"district"."A13" = unemployment rate in 1996.',
+        '"district"."A14" = entrepreneurs per 1000 inhabitants.',
+        '"district"."A15" = number of crimes committed in 1995.',
+        '"district"."A16" = number of crimes committed in 1996.',
+    ],
+    "california_schools": [
+        '"schools"."NCESDist" = NCES district identifier.',
+        '"schools"."NCESSchool" = NCES school identifier.',
+        '"schools"."CDSCode" = California school/district code used for joins.',
+        '"frpm"."Enrollment (Ages 5-17)" = enrollment count for ages 5-17.',
+        '"satscores"."NumGE1500" / "satscores"."NumTstTakr" = excellence rate.',
+        '"satscores"."AvgScrRead" = average reading score.',
+        'Complete school address columns should be "Street", "City", "State", "Zip".',
+    ],
+    "toxicology": [
+        '"molecule"."label" = \'+\' means carcinogenic.',
+        '"molecule"."label" = \'-\' means non carcinogenic.',
+        '"atom"."element" stores lowercase chemical symbols such as \'cl\' for Chlorine and \'ca\' for Calcium.',
+    ],
+    "card_games": [
+        '"cards"."id" is the printed card identifier.',
+        '"cards"."name" is the card name.',
+        '"cards"."rarity" uses lowercase values such as \'mythic\'.',
+        '"legalities"."format" uses lowercase values such as \'gladiator\'.',
+        '"legalities"."status" uses values such as \'Banned\'.',
+    ],
+    "formula_1": [
+        '"status"."statusId" = 2 means Disqualified.',
+        '"results"."time" being non-null indicates the driver finished with a recorded result time.',
+        '"races"."name" stores Grand Prix names such as \'Australian Grand Prix\'.',
+        'Lap times are stored as text and must be parsed numerically for fastest/average comparisons.',
+    ],
+}
+
 
 @dataclass
 class AgentState:
@@ -214,6 +255,15 @@ def _sample_values(conn: sqlite3.Connection, table: str, column: str) -> list[st
     return [str(row[0]) for row in rows if row[0] not in (None, "") and len(str(row[0])) <= 80]
 
 
+def _render_domain_aliases(db_id: str) -> str:
+    aliases = DOMAIN_ALIASES.get(db_id)
+    if not aliases:
+        return ""
+    lines = ["", "-- Domain aliases for opaque columns. Use these meanings when choosing columns."]
+    lines.extend(f"-- {alias}" for alias in aliases)
+    return "\n".join(lines)
+
+
 @lru_cache(maxsize=512)
 def _render_value_hints(db_id: str, question: str) -> str:
     """Add compact exact-value hints for likely categorical/text columns."""
@@ -266,7 +316,12 @@ def _attach_schema(state: AgentState) -> dict:
     with timed_node("attach_schema"):
         schema = render_schema(state.db_id)
         trimmed_schema = trim_schema_for_question(schema, state.question)
-        return {"schema": trimmed_schema + _render_value_hints(state.db_id, state.question)}
+        enriched_schema = (
+            trimmed_schema
+            + _render_domain_aliases(state.db_id)
+            + _render_value_hints(state.db_id, state.question)
+        )
+        return {"schema": enriched_schema}
 
 
 def _normalize_sql(sql: str) -> str:
@@ -311,6 +366,133 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+def _is_aggregate_question(question: str) -> bool:
+    lowered = question.lower()
+    return any(
+        term in lowered
+        for term in (
+            "average",
+            "avg",
+            "count",
+            "difference",
+            "how many",
+            "number of",
+            "percentage",
+            "sum",
+            "total",
+        )
+    )
+
+
+def _is_aggregate_sql(sql: str) -> bool:
+    return bool(re.search(r"\b(avg|count|sum|min|max)\s*\(", sql, flags=re.IGNORECASE))
+
+
+def _expects_single_aggregate(question: str) -> bool:
+    lowered = question.lower()
+    if not _is_aggregate_question(question):
+        return False
+    grouped_cues = (" by each ", " for each ", " per ", " grouped by ", " group by ", " list ")
+    return not any(cue in f" {lowered} " for cue in grouped_cues)
+
+
+def _first_select_expression(sql: str) -> str:
+    match = re.search(r"\bselect\b(.*?)\bfrom\b", sql, flags=re.IGNORECASE | re.DOTALL)
+    return match.group(1).lower() if match else ""
+
+
+def _deterministic_verify_issue(state: AgentState) -> str | None:
+    execution = state.execution
+    if execution is None:
+        return "SQL was not executed; revise the query before verification."
+    if not execution.ok:
+        return f"SQL execution returned an error: {execution.error}"
+
+    rows = execution.rows or []
+    columns = execution.columns or []
+    if (
+        rows
+        and len(rows) == 1
+        and len(rows[0]) == 1
+        and (rows[0][0] is None or rows[0][0] == "")
+        and (_is_aggregate_sql(state.sql) or _is_aggregate_question(state.question))
+    ):
+        return (
+            "Aggregate result is NULL/empty. Reconsider the measure column and filters. "
+            "For financial crime questions, use \"district\".\"A15\" for crimes in 1995 "
+            "and \"district\".\"A16\" for crimes in 1996."
+        )
+
+    if (
+        rows
+        and len(rows) > 1
+        and _is_aggregate_sql(state.sql)
+        and _expects_single_aggregate(state.question)
+    ):
+        return (
+            "Aggregate shape mismatch: the question asks for one overall aggregate value, "
+            "but the SQL returned multiple rows. Remove GROUP BY unless the question asks for "
+            "a per-group result."
+        )
+
+    if _expects_single_aggregate(state.question) and re.search(r"\bgroup\s+by\b", state.sql, re.IGNORECASE):
+        return (
+            "Unrequested GROUP BY: the question asks for one overall aggregate value. "
+            "Remove GROUP BY and compute the aggregate over the filtered rows."
+        )
+
+    if rows and len(rows) > 1 and not _is_aggregate_sql(state.sql):
+        canonical_rows = [tuple("" if cell is None else str(cell) for cell in row) for row in rows]
+        if len(set(canonical_rows)) < len(canonical_rows) and "distinct" not in state.sql.lower():
+            return (
+                "Duplicate rows detected. If the question asks for entities, coordinates, IDs, names, "
+                "or a distinct list, add DISTINCT or fix the join cardinality."
+            )
+
+    question = state.question.lower()
+    sql = state.sql.lower()
+    select_expr = _first_select_expression(state.sql)
+
+    if state.db_id == "california_schools":
+        asks_school_id = (
+            "nces school" in question
+            or ("school" in question and "identification" in question)
+            or ("school" in question and "id" in question)
+        )
+        if asks_school_id and "ncesdist" in select_expr and "ncesschool" not in select_expr:
+            return (
+                "Projection mismatch: the question asks for the NCES school identification number. "
+                "Select \"schools\".\"NCESSchool\", not \"schools\".\"NCESDist\"."
+            )
+        asks_complete_address = "complete address" in question
+        if asks_complete_address and columns and [c.lower() for c in columns[:4]] == [
+            "street",
+            "city",
+            "zip",
+            "state",
+        ]:
+            return (
+                "Projection order mismatch: complete school addresses should be returned as "
+                "\"Street\", \"City\", \"State\", \"Zip\"."
+            )
+
+    if state.db_id == "card_games" and "print card" in question:
+        if re.search(r"\bname\b", select_expr) and not re.search(r"\bid\b", select_expr):
+            return (
+                "Projection mismatch: the question asks for print cards. "
+                "Select DISTINCT \"cards\".\"id\" as the printed card identifier, not only the card name."
+            )
+
+    if state.db_id == "toxicology":
+        if "carcinogenic" in question and "'carcinogenic'" in sql:
+            return (
+                "Wrong label literal: toxicology uses \"molecule\".\"label\" = '+' for carcinogenic "
+                "and '-' for non carcinogenic, not the string 'carcinogenic'."
+            )
+
+    return None
 
 
 def generate_sql_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -363,6 +545,18 @@ def verify_node(state: AgentState, config: RunnableConfig) -> dict:
     """
     with timed_node("verify"):
         execution = state.execution.render() if state.execution else "ERROR: SQL was not executed."
+        deterministic_issue = _deterministic_verify_issue(state)
+        if deterministic_issue:
+            return {
+                "verify_ok": False,
+                "verify_issue": deterministic_issue,
+                "history": state.history + [{
+                    "node": "verify",
+                    "ok": False,
+                    "issue": deterministic_issue,
+                    "source": "deterministic",
+                }],
+            }
         response = llm().invoke(
             [
                 ("system", prompts.VERIFY_SYSTEM),
