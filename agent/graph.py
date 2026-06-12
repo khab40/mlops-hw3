@@ -19,7 +19,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -29,7 +31,7 @@ from langgraph.graph import END, START, StateGraph
 from agent import prompts
 from agent.execution import ExecutionResult, execute_sql
 from agent.metrics import timed_node
-from agent.schema import render_schema, trim_schema_for_question
+from agent.schema import db_path, render_schema, trim_schema_for_question
 
 # Total generate + revise calls before the loop is forced to stop.
 # 3-5 is a reasonable range; tune it as part of Phase 3.
@@ -41,6 +43,76 @@ VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 # Lets you point the agent at e.g. OpenAI while iterating without a running vLLM.
 LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "not-needed")
 LLM_MAX_TOKENS = int(os.environ.get("AGENT_MAX_TOKENS", "256"))
+VALUE_HINT_MAX_COLUMNS = int(os.environ.get("AGENT_VALUE_HINT_MAX_COLUMNS", "12"))
+VALUE_HINT_MAX_VALUES = int(os.environ.get("AGENT_VALUE_HINT_MAX_VALUES", "8"))
+
+QUESTION_STOP_WORDS = {
+    "about",
+    "above",
+    "after",
+    "all",
+    "among",
+    "are",
+    "before",
+    "between",
+    "calculate",
+    "card",
+    "cards",
+    "could",
+    "from",
+    "give",
+    "had",
+    "has",
+    "have",
+    "highest",
+    "how",
+    "list",
+    "lowest",
+    "many",
+    "more",
+    "most",
+    "name",
+    "number",
+    "please",
+    "print",
+    "prints",
+    "provide",
+    "received",
+    "show",
+    "than",
+    "that",
+    "the",
+    "their",
+    "them",
+    "these",
+    "they",
+    "this",
+    "user",
+    "users",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "whose",
+    "with",
+    "was",
+    "were",
+    "year",
+}
+
+VALUE_HINT_SKIP_COLUMN_PARTS = (
+    "about",
+    "body",
+    "email",
+    "flavor",
+    "image",
+    "note",
+    "profile",
+    "text",
+    "url",
+    "website",
+)
 
 
 @dataclass
@@ -71,11 +143,134 @@ def llm() -> ChatOpenAI:
 
 # ---- Nodes ------------------------------------------------------------
 
+def _q(ident: str) -> str:
+    """Double-quote a SQLite identifier."""
+    return '"' + ident.replace('"', '""') + '"'
+
+
+def _question_terms(question: str) -> list[str]:
+    terms = []
+    for term in re.findall(r"[a-zA-Z][a-zA-Z0-9_'-]+", question.lower()):
+        term = term.strip("'")
+        if len(term) >= 3 and term not in QUESTION_STOP_WORDS and term not in terms:
+            terms.append(term)
+    return terms[:16]
+
+
+def _looks_like_value_column(table: str, column: str, ctype: str, terms: list[str]) -> bool:
+    del table, ctype
+    lowered_column = column.lower()
+    if any(part in lowered_column for part in VALUE_HINT_SKIP_COLUMN_PARTS):
+        return False
+    if any(term in lowered_column for term in terms):
+        return True
+    if lowered_column in {
+        "name",
+        "type",
+        "status",
+        "format",
+        "label",
+        "element",
+        "department",
+        "district",
+        "city",
+        "state",
+        "colour",
+        "color",
+    }:
+        return True
+    return any(part in lowered_column for part in ("date", "time", "name", "type", "status"))
+
+
+def _value_match_score(value: str, terms: list[str]) -> int:
+    lowered = value.lower()
+    return sum(1 for term in terms if term in lowered)
+
+
+def _matching_values(conn: sqlite3.Connection, table: str, column: str, terms: list[str]) -> list[str]:
+    if not terms:
+        return []
+    where = " OR ".join(f"LOWER(CAST({_q(column)} AS TEXT)) LIKE ?" for _ in terms)
+    params = [f"%{term}%" for term in terms]
+    sql = (
+        f"SELECT DISTINCT {_q(column)} FROM {_q(table)} "
+        f"WHERE {_q(column)} IS NOT NULL AND ({where}) "
+        "LIMIT 100"
+    )
+    rows = conn.execute(sql, params).fetchall()
+    values = [str(row[0]) for row in rows if row[0] not in (None, "") and len(str(row[0])) <= 80]
+    return sorted(values, key=lambda value: (_value_match_score(value, terms), -len(value)), reverse=True)[
+        :VALUE_HINT_MAX_VALUES
+    ]
+
+
+def _sample_values(conn: sqlite3.Connection, table: str, column: str) -> list[str]:
+    sql = (
+        f"SELECT DISTINCT {_q(column)} FROM {_q(table)} "
+        f"WHERE {_q(column)} IS NOT NULL AND CAST({_q(column)} AS TEXT) != '' "
+        f"LIMIT {VALUE_HINT_MAX_VALUES}"
+    )
+    rows = conn.execute(sql).fetchall()
+    return [str(row[0]) for row in rows if row[0] not in (None, "") and len(str(row[0])) <= 80]
+
+
+@lru_cache(maxsize=512)
+def _render_value_hints(db_id: str, question: str) -> str:
+    """Add compact exact-value hints for likely categorical/text columns."""
+    terms = _question_terms(question)
+    if not terms:
+        return ""
+
+    hints: list[tuple[int, str, str, list[str]]] = []
+    try:
+        with sqlite3.connect(f"file:{db_path(db_id)}?mode=ro", uri=True, timeout=2.0) as conn:
+            tables = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+                    "ORDER BY name"
+                )
+            ]
+            for table in tables:
+                for _cid, column, ctype, *_rest in conn.execute(f"PRAGMA table_info({_q(table)})"):
+                    if not _looks_like_value_column(table, column, ctype or "", terms):
+                        continue
+                    values = _matching_values(conn, table, column, terms)
+                    column_hits = sum(1 for term in terms if term in column.lower())
+                    table_hits = sum(1 for term in terms if term in table.lower())
+                    if not values and column_hits:
+                        values = _sample_values(conn, table, column)
+                    if values:
+                        value_hits = max(_value_match_score(value, terms) for value in values)
+                        score = (10 * value_hits) + (3 * column_hits) + table_hits
+                        hints.append((score, table, column, values))
+    except Exception:  # noqa: BLE001
+        return ""
+
+    if not hints:
+        return ""
+
+    lines = [
+        "",
+        "-- Relevant exact values from the database. Prefer these spellings/casing in filters.",
+    ]
+    for _score, table, column, values in sorted(hints, reverse=True)[:VALUE_HINT_MAX_COLUMNS]:
+        rendered = ", ".join(repr(value) for value in values[:VALUE_HINT_MAX_VALUES])
+        lines.append(f"-- {_q(table)}.{_q(column)} values: {rendered}")
+    return "\n".join(lines)
+
+
 def _attach_schema(state: AgentState) -> dict:
     """Provided. Render the DB schema once at the start of the run."""
     with timed_node("attach_schema"):
         schema = render_schema(state.db_id)
-        return {"schema": trim_schema_for_question(schema, state.question)}
+        trimmed_schema = trim_schema_for_question(schema, state.question)
+        return {"schema": trimmed_schema + _render_value_hints(state.db_id, state.question)}
+
+
+def _normalize_sql(sql: str) -> str:
+    return re.sub(r"\s+", " ", sql.strip().rstrip(";")).lower()
 
 
 def _extract_sql(text: str) -> str:
@@ -172,6 +367,7 @@ def verify_node(state: AgentState, config: RunnableConfig) -> dict:
             [
                 ("system", prompts.VERIFY_SYSTEM),
                 ("user", prompts.VERIFY_USER.format(
+                    schema=state.schema,
                     question=state.question,
                     sql=state.sql,
                     execution=execution,
@@ -208,6 +404,7 @@ def revise_node(state: AgentState, config: RunnableConfig) -> dict:
     """
     with timed_node("revise"):
         execution = state.execution.render() if state.execution else "ERROR: SQL was not executed."
+        revision_issue = state.verify_issue
         response = llm().invoke(
             [
                 ("system", prompts.REVISE_SYSTEM),
@@ -216,18 +413,41 @@ def revise_node(state: AgentState, config: RunnableConfig) -> dict:
                     question=state.question,
                     sql=state.sql,
                     execution=execution,
-                    issue=state.verify_issue,
+                    issue=revision_issue,
                 )),
             ],
             config=config,
         )
         sql = _extract_sql(response.content)
+        repeated = _normalize_sql(sql) == _normalize_sql(state.sql)
+        if repeated:
+            revision_issue = (
+                f"{state.verify_issue}\n"
+                "The attempted revision repeated the previous SQL. Produce a materially different "
+                "query: change the literal, join path, projection, DISTINCT, aggregation, or filter "
+                "that is most likely wrong."
+            )
+            response = llm().invoke(
+                [
+                    ("system", prompts.REVISE_SYSTEM),
+                    ("user", prompts.REVISE_USER.format(
+                        schema=state.schema,
+                        question=state.question,
+                        sql=state.sql,
+                        execution=execution,
+                        issue=revision_issue,
+                    )),
+                ],
+                config=config,
+            )
+            sql = _extract_sql(response.content)
         return {
             "sql": sql,
             "iteration": state.iteration + 1,
             "history": state.history + [{
                 "node": "revise",
-                "issue": state.verify_issue,
+                "issue": revision_issue,
+                "repeated_previous_sql": repeated,
                 "sql": sql,
             }],
         }

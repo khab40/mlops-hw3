@@ -15,6 +15,12 @@ Rules:
 - Use only tables and columns present in the provided schema.
 - Quote identifiers with double quotes when they contain spaces, punctuation, or mixed case.
 - Do not invent columns, tables, CTE inputs, or values that are not implied by the question.
+- When the schema includes exact value hints, use those spellings and casing for string filters.
+- Preserve the requested output columns and their order exactly.
+- Use DISTINCT when a join can duplicate the requested entity or value.
+- Do not add LIMIT unless the question asks for one row, top N, highest, lowest, first, or similar.
+- For percentages, make the numerator and denominator match the wording of the question.
+- For dates and times, match the stored SQLite value format shown in schema/value hints.
 - Do not explain the query. Do not use markdown.
 """
 
@@ -40,11 +46,18 @@ Mark ok=false when:
 - zero rows look implausible for the question,
 - the query uses an obviously wrong table/column/value,
 - aggregation, sorting, filtering, or limiting is missing when the question asks for it.
+- the output column count or order conflicts with the question,
+- duplicate rows appear where the question asks for a single entity/value or distinct list,
+- a string/date filter likely uses the wrong exact spelling, casing, abbreviation, or timestamp format,
+- a percentage, average, count, or difference uses the wrong numerator, denominator, grouping, or filter scope.
 
 Mark ok=true when the SQL executed and the result shape is a plausible answer, even if you cannot prove it is perfect.
 """
 
-VERIFY_USER = """Question:
+VERIFY_USER = """Schema and value hints:
+{schema}
+
+Question:
 {question}
 
 SQL:
@@ -62,6 +75,12 @@ Rules:
 - Return exactly one corrected read-only SQLite SELECT query.
 - Use only tables and columns present in the schema.
 - Preserve the user's intent, but fix the verifier issue and execution error/result mismatch.
+- Do not return the same SQL as the previous attempt.
+- When the schema includes exact value hints, use those spellings and casing for string filters.
+- If the previous result was empty, reconsider exact literals, date formats, joins, and filter columns.
+- If the previous result had duplicates, add DISTINCT or fix the join cardinality.
+- If selected columns do not match the question, change the projection and preserve requested column order.
+- If an aggregate is wrong, fix the grouping, numerator/denominator, or filter scope rather than making cosmetic edits.
 - Quote identifiers with double quotes when needed.
 - Do not explain the query. Do not use markdown.
 """
