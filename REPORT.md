@@ -32,7 +32,7 @@ The Grafana dashboard is committed at `infra/grafana/provisioning/dashboards/ser
 
 The agent is implemented in `agent/graph.py` and `agent/prompts.py`. The graph follows `generate_sql -> execute -> verify`, routes to `revise` when `verify.ok=false`, and caps the loop at three total generate/revise attempts. The Phase 3 smoke run used five eval questions against the real model: all five executed without runtime error, four were accepted by the verifier, and one question triggered the revise path. In that revise case the verifier rejected a no-data answer, but Qwen repeated the same SQL until the iteration cap stopped the loop.
 
-Langfuse tracing works for the full graph after propagating the LangChain runnable config into nested LLM calls. The trace tags include `agent`, `phase:4`, `run:phase4-smoke`, `question_index:N`, and the VM tag. A selected trace showed the expected `generate_sql`, `execute`, `verify`, `revise`, and repeated execute/verify waterfall with nested model spans. The trace screenshot is `screenshots/langfuse_trace.png`, and the tagged trace list is `screenshots/langfuse_tags.png`.
+Langfuse tracing was rerun after fixing the VM `.env` mismatch that left `~/mlops-hw3/.env` with empty Langfuse keys while `/mlops-hw3/.env` had populated keys. After redeploying the local `.env` to both paths and restarting the agent, Langfuse API auth succeeded and 10 new traces were captured for `run:phase4-rerun-envfix`. The trace tags are `agent`, `phase:4`, `run:phase4-rerun-envfix`, `question_index:N`, `db:<db_id>`, and `vm:89.169.108.245`. Four of the 10 requests triggered `revise`, and all 10 returned `ok=true`; the rerun artifact is `results/phase4_trace_generation.json`. A selected trace (`30b7d9102fc3cd008375e74c7097aedf`) had 19 observations, including `attach_schema`, `generate_sql`, `execute`, three `verify` spans, two `revise` spans, route spans, and nested `ChatOpenAI` generations using `Qwen/Qwen3-30B-A3B-Instruct-2507`. The trace screenshot is `screenshots/langfuse_trace.png`, and the tagged trace list is `screenshots/langfuse_tags.png`.
 
 ## Baseline Eval
 
@@ -41,22 +41,22 @@ The eval runner is `evals/run_eval.py`. It calls the agent, extracts each genera
 | Metric | Result |
 |---|---:|
 | Eval questions | 30 |
-| Correct final answers | 10 |
-| Overall execution accuracy | 33.3% |
+| Correct final answers | 17 |
+| Overall execution accuracy | 56.7% |
 | Agent errors | 0 |
 | Final SQL execution errors | 0 |
-| Questions triggering revise | 11 |
-| Wall-clock eval time | 57.9s |
+| Questions triggering revise | 12 |
+| Wall-clock eval time | 63.0s |
 
 Per-iteration pass rate:
 
 | Attempt | Correct | Pass rate |
 |---:|---:|---:|
-| 1 / zero-based iter 0 | 10 / 30 | 33.3% |
-| 2 / zero-based iter 1 | 10 / 30 | 33.3% |
-| 3 / zero-based iter 2 | 10 / 30 | 33.3% |
+| 1 / zero-based iter 0 | 13 / 30 | 43.3% |
+| 2 / zero-based iter 1 | 16 / 30 | 53.3% |
+| 3 / zero-based iter 2 | 17 / 30 | 56.7% |
 
-The baseline loop did not improve accuracy. All 11 questions that triggered `revise` were incorrect on the first attempt and remained incorrect after revision. No initially correct answers were broken. The strongest datasets were `student_club` at `3/4`, `financial` at `2/3`, and `superhero` at `2/3`; the weakest were `formula_1`, `thrombosis_prediction`, and `toxicology`, all at `0` correct.
+The loop now does measurable work. Four initially wrong answers were recovered by `revise`, no initially correct answers were broken, and the final pass rate improved by 13.3 percentage points over attempt 1. The recovered cases were duplicate-coordinate cleanup in `formula_1`, SQL repair after an invalid `dual` table in `student_club`, address column-order repair in `california_schools`, and print-card ID projection repair in `card_games`. The strongest datasets were `student_club`, `financial`, and `california_schools`, all at full accuracy; the weakest remained `thrombosis_prediction` and `toxicology`.
 
 ## Hitting The SLO
 
@@ -99,15 +99,15 @@ Quality survived the serving changes on this eval set: there were 0 question-lev
 
 ## Agent Value
 
-The verify/revise loop did not help execution accuracy on this eval set. The evidence is the per-iteration pass rate: attempt 1 was `10/30`, attempt 2 was `10/30`, and attempt 3 was `10/30`. The loop did help with observability and diagnosis because Langfuse exposed the full `generate_sql -> execute -> verify -> revise` waterfall and showed why multi-step requests were slower, but the revision policy did not recover wrong SQL. For the measured SLO, keeping the full graph available while using the fast `generate_sql -> execute` path under load was the right tradeoff.
+The verify/revise loop now helps execution accuracy on this eval set. The evidence is the per-iteration pass rate: attempt 1 was `13/30`, attempt 2 was `16/30`, and attempt 3 was `17/30`. Among the 12 revised questions, four moved from incorrect to correct, seven stayed incorrect, and one was already correct and remained correct. The useful revisions were not cosmetic: they added `DISTINCT`, removed a generated `dual` table pattern, fixed requested output order, and switched from card name to printed card ID. The loop is therefore earning its keep for quality, while the fast path remains the right serving mode under the Phase 6 latency/RPS SLO.
 
 ## With More Time
 
 - Replace crude schema trimming with schema retrieval: rank tables/columns by question terms plus foreign-key neighborhoods, then include only the top schema slice.
-- Add deterministic SQL guards before execution: reject `SELECT *`, missing `LIMIT` on broad queries, and joins that ignore available foreign keys.
+- Broaden deterministic SQL guards before execution: reject `SELECT *`, missing `LIMIT` on broad queries, and joins that ignore available foreign keys.
 - Run verifier only on suspicious cases: execution error, zero rows for count/list questions, too many rows, or SQL touching no relevant tables.
-- Make revise produce an explicit alternative plan before SQL, then reject identical revised SQL so the loop cannot waste attempts.
-- Build a focused prompt-tuning set from the 20 consistently wrong eval questions, especially `formula_1`, `thrombosis_prediction`, and `toxicology`.
+- Make revise produce an explicit alternative plan before SQL so the loop can explain why the replacement query should differ.
+- Build a focused prompt-tuning set from the remaining 13 consistently wrong eval questions, especially `thrombosis_prediction`, `toxicology`, and harder `codebase_community` cases.
 
 ## Final Deliverables
 
