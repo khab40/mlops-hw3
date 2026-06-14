@@ -1,0 +1,170 @@
+{
+  "run": "phase4-rerun-envfix",
+  "results": [
+    {
+      "index": 1,
+      "db_id": "formula_1",
+      "question": "What is the coordinates location of the circuits for Australian grand prix?",
+      "ok": true,
+      "iterations": 2,
+      "history_nodes": [
+        "generate_sql",
+        "verify",
+        "revise",
+        "verify"
+      ],
+      "verify_issues": [
+        "Duplicate rows detected. If the question asks for entities, coordinates, IDs, names, or a distinct list, add DISTINCT or fix the join cardinality.",
+        "Verifier accepted the result."
+      ],
+      "latency_seconds": 1.815524124998774
+    },
+    {
+      "index": 2,
+      "db_id": "superhero",
+      "question": "List down Ajax's superpowers.",
+      "ok": true,
+      "iterations": 1,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "verify_issues": [
+        "Verifier accepted the result."
+      ],
+      "latency_seconds": 0.7889656249972177
+    },
+    {
+      "index": 3,
+      "db_id": "california_schools",
+      "question": "List the top five schools, by descending order, from the highest to the lowest, the most number of Enrollment (Ages 5-17). Please give their NCES school identification number.",
+      "ok": true,
+      "iterations": 1,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "verify_issues": [
+        "Verifier accepted the result."
+      ],
+      "latency_seconds": 1.4930351250004605
+    },
+    {
+      "index": 4,
+      "db_id": "financial",
+      "question": "What is the average number of crimes committed in 1995 in regions where the number exceeds 4000 and the region has accounts that are opened starting from the year 1997?",
+      "ok": true,
+      "iterations": 3,
+      "history_nodes": [
+        "generate_sql",
+        "verify",
+        "revise",
+        "verify",
+        "revise",
+        "verify"
+      ],
+      "verify_issues": [
+        "incorrect aggregation scope",
+        "Aggregate shape mismatch: the question asks for one overall aggregate value, but the SQL returned multiple rows. Remove GROUP BY unless the question asks for a per-group result.",
+        "incorrect aggregation scope"
+      ],
+      "latency_seconds": 5.609419584001444
+    },
+    {
+      "index": 5,
+      "db_id": "financial",
+      "question": "How many male clients in 'Hl.m. Praha' district?",
+      "ok": true,
+      "iterations": 1,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "verify_issues": [
+        "Verifier accepted the result."
+      ],
+      "latency_seconds": 2.1856624590000138
+    },
+    {
+      "index": 6,
+      "db_id": "formula_1",
+      "question": "What is the average fastest lap time in seconds for Lewis Hamilton in all the Formula_1 races?",
+      "ok": true,
+      "iterations": 1,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "verify_issues": [
+        "Verifier accepted the result."
+      ],
+      "latency_seconds": 3.359753249998903
+    },
+    {
+      "index": 7,
+      "db_id": "formula_1",
+      "question": "From race no. 50 to 100, how many finishers have been disqualified?",
+      "ok": true,
+      "iterations": 1,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "verify_issues": [
+        "Verifier accepted the result."
+      ],
+      "latency_seconds": 1.422063750000234
+    },
+    {
+      "index": 8,
+      "db_id": "student_club",
+      "question": "Calculate the difference of the total amount spent in all events by the Student_Club in year 2019 and 2020.",
+      "ok": true,
+      "iterations": 2,
+      "history_nodes": [
+        "generate_sql",
+        "verify",
+        "revise",
+        "verify"
+      ],
+      "verify_issues": [
+        "SQL execution returned an error: OperationalError: no such table: dual",
+        "Verifier accepted the result."
+      ],
+      "latency_seconds": 1.4214824580012646
+    },
+    {
+      "index": 9,
+      "db_id": "california_schools",
+      "question": "What is the complete address of the school with the lowest excellence rate? Indicate the Street, City, Zip and State.",
+      "ok": true,
+      "iterations": 2,
+      "history_nodes": [
+        "generate_sql",
+        "verify",
+        "revise",
+        "verify"
+      ],
+      "verify_issues": [
+        "Projection order mismatch: complete school addresses should be returned as \"Street\", \"City\", \"State\", \"Zip\".",
+        "Verifier accepted the result."
+      ],
+      "latency_seconds": 2.333807708997483
+    },
+    {
+      "index": 10,
+      "db_id": "toxicology",
+      "question": "Calculate the percentage of carcinogenic molecules which contain the Chlorine element.",
+      "ok": true,
+      "iterations": 1,
+      "history_nodes": [
+        "generate_sql",
+        "verify"
+      ],
+      "verify_issues": [
+        "Verifier accepted the result."
+      ],
+      "latency_seconds": 0.9209673329969519
+    }
+  ]
+}

@@ -57,7 +57,7 @@ Mark ok=false when:
 Mark ok=true when the SQL executed and the result shape is a plausible answer, even if you cannot prove it is perfect.
 """
 
-VERIFY_USER = """Schema and value hints:
+VERIFY_USER = """Compact schema/context:
 {schema}
 
 Question:
@@ -66,7 +66,7 @@ Question:
 SQL:
 {sql}
 
-Execution result:
+Execution metadata:
 {execution}
 
 Should this answer be accepted? Return JSON only."""

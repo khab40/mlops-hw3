@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -52,11 +53,18 @@ AGENT_MAX_WORKERS = int(os.environ.get("AGENT_MAX_WORKERS", "128"))
 AGENT_FAST_PATH = os.environ.get("AGENT_FAST_PATH", "false").lower() in {"1", "true", "yes"}
 AGENT_MAX_INFLIGHT = int(os.environ.get("AGENT_MAX_INFLIGHT", str(AGENT_MAX_WORKERS)))
 AGENT_QUEUE_TIMEOUT_SECONDS = float(os.environ.get("AGENT_QUEUE_TIMEOUT_SECONDS", "0.25"))
+AGENT_SINGLEFLIGHT = os.environ.get("AGENT_SINGLEFLIGHT", "true").lower() in {"1", "true", "yes"}
+AGENT_ADAPTIVE_PRESSURE = os.environ.get("AGENT_ADAPTIVE_PRESSURE", "true").lower() in {"1", "true", "yes"}
+AGENT_DETERMINISTIC_ONLY_AT = int(os.environ.get("AGENT_DETERMINISTIC_ONLY_AT", str(max(1, AGENT_MAX_INFLIGHT // 4))))
+AGENT_PRESSURE_FAST_PATH_AT = int(os.environ.get("AGENT_PRESSURE_FAST_PATH_AT", str(max(2, AGENT_MAX_INFLIGHT // 2))))
 _graph_executor = ThreadPoolExecutor(
     max_workers=AGENT_MAX_WORKERS,
     thread_name_prefix="agent-graph",
 )
 _admission = asyncio.Semaphore(AGENT_MAX_INFLIGHT)
+_admitted_count = 0
+_singleflight_lock = asyncio.Lock()
+_singleflight: dict[tuple[str, str], asyncio.Future] = {}
 atexit.register(_graph_executor.shutdown, wait=False, cancel_futures=True)
 
 app = FastAPI()
@@ -73,6 +81,30 @@ def _executor_queue_depth() -> int:
         return int(queue.qsize())
     except NotImplementedError:
         return 0
+
+
+def _answer_key(req: "AnswerRequest") -> tuple[str, str]:
+    question = re.sub(r"\s+", " ", req.question.strip().lower())
+    return req.db.strip(), question
+
+
+def _consume_future_exception(future: asyncio.Future) -> None:
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _pressure_mode() -> str:
+    if not AGENT_ADAPTIVE_PRESSURE:
+        return "normal"
+    if _admitted_count >= AGENT_PRESSURE_FAST_PATH_AT:
+        return "fast_path"
+    if _admitted_count >= AGENT_DETERMINISTIC_ONLY_AT:
+        return "deterministic_only"
+    return "normal"
 
 
 @app.middleware("http")
@@ -118,7 +150,8 @@ def _run_graph(state: AgentState, config: dict[str, Any]) -> dict[str, Any]:
     start = time.perf_counter()
     GRAPH_IN_PROGRESS.inc()
     try:
-        final = run_fast_path(state, config) if AGENT_FAST_PATH else graph.invoke(state, config=config)
+        adaptive_mode = str(config.get("metadata", {}).get("agent_adaptive_mode", "normal"))
+        final = run_fast_path(state, config) if AGENT_FAST_PATH or adaptive_mode == "fast_path" else graph.invoke(state, config=config)
     except Exception as e:  # noqa: BLE001
         GRAPH_ERRORS_TOTAL.labels(error_type=type(e).__name__).inc()
         GRAPH_DURATION.labels(status="error").observe(time.perf_counter() - start)
@@ -129,38 +162,7 @@ def _run_graph(state: AgentState, config: dict[str, Any]) -> dict[str, Any]:
     return final
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    AGENT_HEALTH_UP.set(1)
-    return {"status": "ok"}
-
-
-@app.post("/answer", response_model=AnswerResponse)
-async def answer(req: AnswerRequest) -> AnswerResponse:
-    state = AgentState(question=req.question, db_id=req.db)
-    trace_tags = ["agent", *[f"{key}:{value}" for key, value in sorted(req.tags.items())]]
-    config: dict[str, Any] = {
-        "callbacks": [_lf_handler] if _lf_handler is not None else [],
-        "metadata": req.tags,
-        "tags": trace_tags,
-        "run_name": "text-to-sql-agent",
-    }
-    admitted = False
-    try:
-        await asyncio.wait_for(_admission.acquire(), timeout=AGENT_QUEUE_TIMEOUT_SECONDS)
-        admitted = True
-        GRAPH_EXECUTOR_QUEUE_DEPTH.set(_executor_queue_depth())
-        loop = asyncio.get_running_loop()
-        final = await loop.run_in_executor(_graph_executor, _run_graph, state, config)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=503, detail="agent overloaded")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-    finally:
-        if admitted:
-            _admission.release()
-        GRAPH_EXECUTOR_QUEUE_DEPTH.set(_executor_queue_depth())
-
+def _response_from_final(final: dict[str, Any]) -> AnswerResponse:
     sql = final.get("sql", "")
     iteration = final.get("iteration", 0)
     history = final.get("history", [])
@@ -196,3 +198,76 @@ async def answer(req: AnswerRequest) -> AnswerResponse:
         ok=True,
         history=history,
     )
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    AGENT_HEALTH_UP.set(1)
+    return {"status": "ok"}
+
+
+@app.post("/answer", response_model=AnswerResponse)
+async def answer(req: AnswerRequest) -> AnswerResponse:
+    if AGENT_SINGLEFLIGHT:
+        key = _answer_key(req)
+        loop = asyncio.get_running_loop()
+        leader = False
+        async with _singleflight_lock:
+            future = _singleflight.get(key)
+            if future is None:
+                future = loop.create_future()
+                future.add_done_callback(_consume_future_exception)
+                _singleflight[key] = future
+                leader = True
+        if not leader:
+            final = await future
+            return _response_from_final(final)
+    else:
+        key = None
+        future = None
+        leader = True
+
+    state = AgentState(question=req.question, db_id=req.db)
+    tags = dict(req.tags)
+    trace_tags = ["agent", *[f"{key}:{value}" for key, value in sorted(tags.items())]]
+    config: dict[str, Any] = {
+        "callbacks": [_lf_handler] if _lf_handler is not None else [],
+        "metadata": tags,
+        "tags": trace_tags,
+        "run_name": "text-to-sql-agent",
+    }
+    admitted = False
+    global _admitted_count
+    try:
+        await asyncio.wait_for(_admission.acquire(), timeout=AGENT_QUEUE_TIMEOUT_SECONDS)
+        admitted = True
+        _admitted_count += 1
+        mode = _pressure_mode()
+        config["metadata"]["agent_adaptive_mode"] = mode
+        config["tags"] = [*trace_tags, f"adaptive_mode:{mode}"]
+        GRAPH_EXECUTOR_QUEUE_DEPTH.set(_executor_queue_depth())
+        loop = asyncio.get_running_loop()
+        final = await loop.run_in_executor(_graph_executor, _run_graph, state, config)
+        if future is not None and not future.done():
+            future.set_result(final)
+    except asyncio.TimeoutError:
+        exc = HTTPException(status_code=503, detail="agent overloaded")
+        if future is not None and not future.done():
+            future.set_exception(exc)
+        raise exc
+    except Exception as e:  # noqa: BLE001
+        exc = HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+        if future is not None and not future.done():
+            future.set_exception(exc)
+        raise exc
+    finally:
+        if admitted:
+            _admitted_count -= 1
+            _admission.release()
+        GRAPH_EXECUTOR_QUEUE_DEPTH.set(_executor_queue_depth())
+        if future is not None and leader:
+            async with _singleflight_lock:
+                if key is not None and _singleflight.get(key) is future:
+                    _singleflight.pop(key, None)
+
+    return _response_from_final(final)

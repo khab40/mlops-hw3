@@ -2,7 +2,7 @@
 
 This repository is a self-hosted text-to-SQL MLOps assignment. It combines a vLLM OpenAI-compatible endpoint, a LangGraph agent, SQLite BIRD databases, Prometheus and Grafana serving observability, Langfuse tracing, offline evals, and a load driver for SLO testing.
 
-Some files are intentionally scaffolded for the assignment. In particular, `agent/graph.py`, `agent/prompts.py`, and `evals/run_eval.py` contain implementation points for later phases.
+The assignment scaffolding has been filled in. `agent/graph.py`, `agent/prompts.py`, and `evals/run_eval.py` contain the implemented agent and eval runner used for the reported results.
 
 The diagrams below intentionally use a conservative Mermaid subset for VS Code preview compatibility: only `flowchart`, quoted node labels, short edge labels, and no HTML line breaks.
 
@@ -11,8 +11,9 @@ The diagrams below intentionally use a conservative Mermaid subset for VS Code p
 ```mermaid
 flowchart LR
     Analyst["Analyst or eval client"] -->|POST answer| AgentAPI["FastAPI agent server"]
-    AgentAPI --> Graph["LangGraph workflow"]
-    Graph -->|schema lookup| Schema["Schema renderer"]
+    AgentAPI --> Gate["Single-flight and admission control"]
+    Gate --> Graph["LangGraph workflow or fast path"]
+    Graph -->|schema lookup| Schema["Schema retrieval and value hints"]
     Schema --> Bird["BIRD SQLite files"]
     Graph -->|chat completions| VLLM["vLLM API server"]
     Graph -->|read only SQL| Executor["SQL executor"]
@@ -20,6 +21,7 @@ flowchart LR
     Graph -->|SQL rows history| AgentAPI
 
     VLLM -->|metrics endpoint| Prometheus["Prometheus"]
+    AgentAPI -->|metrics endpoint| Prometheus
     Prometheus --> Grafana["Grafana dashboard"]
 
     AgentAPI -->|callbacks| Langfuse["Langfuse"]
@@ -65,52 +67,75 @@ flowchart LR
 
 ## Use Case: Answer a Text-to-SQL Request
 
-The runtime path starts at `POST /answer`. The server invokes the LangGraph workflow and returns the final SQL, rows, iteration count, status, and history.
+The runtime path starts at `POST /answer`. The server coalesces identical in-flight `(db, normalized question)` requests when `AGENT_SINGLEFLIGHT=true`, admits work through an in-flight semaphore, and runs blocking graph work in an explicit executor. Under adaptive pressure it can switch from normal graph mode to deterministic-only verification or to the fast path. The response returns the final SQL, rows, iteration count, status, and history.
 
 ```mermaid
 flowchart TD
     Client["Client"] -->|question db tags| API["FastAPI answer endpoint"]
-    API --> State["Create agent state"]
-    State --> Schema["Render database schema"]
+    API --> Coalesce["Single-flight by db and question"]
+    Coalesce --> Admission["Admission semaphore"]
+    Admission --> Mode["Choose normal deterministic-only or fast path"]
+    Mode --> State["Create agent state"]
+    State --> Schema["Retrieve compact schema plus hints"]
     Schema --> Generate["Generate SQL with vLLM"]
     Generate --> Execute["Execute SQL in SQLite"]
-    Execute --> Verify["Verify result with vLLM"]
+    Execute --> Verify["Deterministic and optional LLM verify"]
     Verify --> Response["Return SQL rows iterations history"]
     Response --> Client
 ```
 
 ## Use Case: Verify and Revise SQL
 
-The graph is designed as a self-correction loop. `generate_sql` and each `revise` increment `iteration`; the router stops when verification succeeds or the max iteration cap is reached.
+The full graph is a self-correction loop. `generate_sql` and each `revise` increment `iteration`; the router stops when verification succeeds, `AGENT_MAX_ITERATIONS` is reached, or `AGENT_MAX_REVISIONS` is exhausted. Verification is deterministic first: execution errors, zero-row non-aggregate answers, NULL aggregate results, aggregate-shape mismatches, suspicious projection choices, and broad/ranking queries can be rejected without another LLM call. If `AGENT_SEMANTIC_LLM_VERIFY=true` and conditional rules request it, a verifier model reviews a compact SQL-touched schema slice plus execution metadata. In fast-path mode the agent skips verify/revise and returns `generate_sql -> execute` for latency.
 
 ```mermaid
 flowchart TD
     Start["Start"] --> AttachSchema["Attach schema"]
     AttachSchema --> GenerateSQL["Generate SQL"]
     GenerateSQL --> Execute["Execute SQL"]
-    Execute --> Verify["Verify answer"]
+    Execute --> Verify["Deterministic verify"]
+    Verify -->|needs semantic review| LLMVerify["Optional LLM verify"]
     Verify -->|ok| End["End"]
-    Verify -->|max iterations| End
+    LLMVerify -->|ok| End
+    Verify -->|max iterations or revisions| End
     Verify -->|not ok| Revise["Revise SQL"]
+    LLMVerify -->|not ok| Revise
     Revise --> Execute
 ```
 
-## Use Case: Observe vLLM Serving Health
+## Use Case: Fast Path and Adaptive Pressure
 
-Prometheus scrapes vLLM's `/metrics` endpoint through `host.docker.internal:8000`. Grafana loads the Prometheus datasource and starter serving dashboard from `infra/grafana/provisioning`.
+For the Phase 6 SLO, `agent/server.py` supports a lower-latency path controlled by `AGENT_FAST_PATH` or adaptive pressure metadata. `AGENT_ADAPTIVE_PRESSURE=true` moves admitted requests into `deterministic_only` mode at `AGENT_DETERMINISTIC_ONLY_AT` and into `fast_path` mode at `AGENT_PRESSURE_FAST_PATH_AT`. This protects tail latency under load, with the quality tradeoff documented in `REPORT.md`.
+
+```mermaid
+flowchart LR
+    Request["Answer request"] --> Pressure["Read admitted count"]
+    Pressure -->|normal| FullGraph["Full graph"]
+    Pressure -->|moderate pressure| DetOnly["Graph with deterministic verify"]
+    Pressure -->|high pressure| FastPath["Generate and execute only"]
+    FullGraph --> Response["Response"]
+    DetOnly --> Response
+    FastPath --> Response
+```
+
+## Use Case: Observe Serving Health
+
+Prometheus scrapes vLLM's `/metrics` endpoint through `host.docker.internal:8000` and the agent server's `/metrics` endpoint on port `8001`. Grafana loads the Prometheus datasource and serving dashboard from `infra/grafana/provisioning`.
 
 ```mermaid
 flowchart LR
     Requests["Agent eval load traffic"] --> VLLM["vLLM"]
     VLLM --> Metrics["Metrics endpoint"]
+    Requests --> AgentMetrics["Agent metrics endpoint"]
     Metrics --> Prometheus["Prometheus"]
+    AgentMetrics --> Prometheus
     Prometheus --> Grafana["Grafana dashboard"]
     Grafana --> Operator["Operator reads serving health"]
 ```
 
 ## Use Case: Trace Agent Runs
 
-When `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are present, `agent/server.py` attaches the Langfuse callback handler to each graph invocation. Request `tags` are passed as metadata.
+When `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are present, `agent/server.py` attaches the Langfuse callback handler to each graph invocation. Request `tags` are passed as metadata and also converted to trace tags; the server adds the adaptive mode tag as well.
 
 ```mermaid
 flowchart LR
@@ -141,7 +166,7 @@ flowchart TD
 
 ## Use Case: Run Load and SLO Tests
 
-The load driver samples questions from `load_test/perf_pool.jsonl`, sends them to the agent endpoint at a requested RPS, and writes latency and status summaries to `results/load_test.json`. The same traffic exercises vLLM metrics and Langfuse traces.
+The load driver samples questions from `load_test/perf_pool.jsonl`, sends them to the agent endpoint at a requested RPS, and writes latency and status summaries to `results/load_test.json` or the path passed with `--out`. The same traffic exercises vLLM metrics and the agent Prometheus metrics; Langfuse traces are available when tracing keys are configured, but can be disabled for high-load SLO runs to avoid callback overhead.
 
 ```mermaid
 flowchart LR

@@ -1,4 +1,4 @@
-"""LangGraph agent: text-to-SQL with verify+revise loop.
+"""LangGraph agent: text-to-SQL with optional verify+revise loop.
 
 Graph shape:
 
@@ -9,10 +9,6 @@ Graph shape:
                                               ok=false ---+----> revise -> execute -> verify (loop)
 
 Loop is capped at MAX_ITERATIONS total generate/revise calls.
-
-The execute node and the graph wiring are provided. `generate_sql_node` is
-filled in as a worked example; you implement `verify`, `revise`, and the
-conditional router following the same shape.
 """
 from __future__ import annotations
 
@@ -31,18 +27,27 @@ from langgraph.graph import END, START, StateGraph
 from agent import prompts
 from agent.execution import ExecutionResult, execute_sql
 from agent.metrics import timed_node
-from agent.schema import db_path, render_schema, trim_schema_for_question
+from agent.schema import db_path, retrieve_schema_for_question
 
 # Total generate + revise calls before the loop is forced to stop.
 # 3-5 is a reasonable range; tune it as part of Phase 3.
-MAX_ITERATIONS = 3
+MAX_ITERATIONS = int(os.environ.get("AGENT_MAX_ITERATIONS", "3"))
+MAX_REVISIONS = int(os.environ.get("AGENT_MAX_REVISIONS", "1"))
 
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
+VERIFIER_BASE_URL = os.environ.get("AGENT_VERIFIER_BASE_URL", VLLM_BASE_URL)
+VERIFIER_MODEL = os.environ.get("AGENT_VERIFIER_MODEL", VLLM_MODEL)
 # vLLM ignores the key, but a hosted OpenAI-compatible provider needs a real one.
 # Lets you point the agent at e.g. OpenAI while iterating without a running vLLM.
 LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "not-needed")
+VERIFIER_API_KEY = os.environ.get("AGENT_VERIFIER_API_KEY", LLM_API_KEY)
 LLM_MAX_TOKENS = int(os.environ.get("AGENT_MAX_TOKENS", "256"))
+VERIFIER_MAX_TOKENS = int(os.environ.get("AGENT_VERIFIER_MAX_TOKENS", "96"))
+CONDITIONAL_VERIFY = os.environ.get("AGENT_CONDITIONAL_VERIFY", "true").lower() in {"1", "true", "yes"}
+SEMANTIC_LLM_VERIFY = os.environ.get("AGENT_SEMANTIC_LLM_VERIFY", "false").lower() in {"1", "true", "yes"}
+VERIFY_SCHEMA_MAX_CHARS = int(os.environ.get("AGENT_VERIFY_SCHEMA_MAX_CHARS", "3000"))
+VERIFY_MANY_ROWS_THRESHOLD = int(os.environ.get("AGENT_VERIFY_MANY_ROWS_THRESHOLD", "80"))
 VALUE_HINT_MAX_COLUMNS = int(os.environ.get("AGENT_VALUE_HINT_MAX_COLUMNS", "12"))
 VALUE_HINT_MAX_VALUES = int(os.environ.get("AGENT_VALUE_HINT_MAX_VALUES", "8"))
 
@@ -182,6 +187,17 @@ def llm() -> ChatOpenAI:
     )
 
 
+def verifier_llm() -> ChatOpenAI:
+    """Separate verifier client so verification can use a smaller/faster model."""
+    return ChatOpenAI(
+        model=VERIFIER_MODEL,
+        base_url=VERIFIER_BASE_URL,
+        api_key=VERIFIER_API_KEY,
+        temperature=0.0,
+        max_tokens=VERIFIER_MAX_TOKENS,
+    )
+
+
 # ---- Nodes ------------------------------------------------------------
 
 def _q(ident: str) -> str:
@@ -314,8 +330,7 @@ def _render_value_hints(db_id: str, question: str) -> str:
 def _attach_schema(state: AgentState) -> dict:
     """Provided. Render the DB schema once at the start of the run."""
     with timed_node("attach_schema"):
-        schema = render_schema(state.db_id)
-        trimmed_schema = trim_schema_for_question(schema, state.question)
+        trimmed_schema = retrieve_schema_for_question(state.db_id, state.question)
         enriched_schema = (
             trimmed_schema
             + _render_domain_aliases(state.db_id)
@@ -403,6 +418,99 @@ def _first_select_expression(sql: str) -> str:
     return match.group(1).lower() if match else ""
 
 
+def _schema_chunks_for_verify(schema: str) -> dict[str, str]:
+    chunks = re.split(r"\n(?=CREATE TABLE )", schema)
+    tables: dict[str, str] = {}
+    for chunk in chunks:
+        match = re.match(r'CREATE TABLE "((?:[^"]|"")+)".*?\(', chunk, flags=re.DOTALL)
+        if match:
+            tables[match.group(1).replace('""', '"').lower()] = chunk
+    return tables
+
+
+def _sql_table_names(sql: str) -> set[str]:
+    names: set[str] = set()
+    for match in re.finditer(
+        r'\b(?:from|join)\s+(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_]*))',
+        sql,
+        flags=re.IGNORECASE,
+    ):
+        quoted, bare = match.groups()
+        names.add((quoted or bare or "").replace('""', '"').lower())
+    return {name for name in names if name}
+
+
+def _compact_schema_for_verifier(state: AgentState) -> str:
+    if VERIFY_SCHEMA_MAX_CHARS <= 0 or len(state.schema) <= VERIFY_SCHEMA_MAX_CHARS:
+        return state.schema
+
+    table_chunks = _schema_chunks_for_verify(state.schema)
+    sql_tables = _sql_table_names(state.sql)
+    selected = [chunk for table, chunk in table_chunks.items() if table in sql_tables]
+    aliases = _render_domain_aliases(state.db_id).strip()
+    parts = ["-- Compact verifier schema: only SQL-touched tables plus domain aliases."]
+    if aliases:
+        parts.append(aliases)
+    parts.extend(selected)
+    rendered = "\n".join(parts)
+    if len(rendered) > VERIFY_SCHEMA_MAX_CHARS:
+        return rendered[:VERIFY_SCHEMA_MAX_CHARS] + "\n-- verifier schema truncated"
+    return rendered
+
+
+def _execution_metadata(execution: ExecutionResult | None) -> str:
+    if execution is None:
+        return "status=not_executed"
+    if not execution.ok:
+        return f"status=error\nerror={execution.error}"
+    columns = ", ".join(execution.columns or [])
+    first_row = ""
+    if execution.rows:
+        first_row = " | ".join("" if cell is None else str(cell) for cell in execution.rows[0])
+    return (
+        "status=ok\n"
+        f"row_count={execution.row_count}\n"
+        f"columns={columns}\n"
+        f"first_row={first_row}"
+    )
+
+
+def _adaptive_mode(config: RunnableConfig) -> str:
+    metadata = config.get("metadata") if isinstance(config, dict) else None
+    if not isinstance(metadata, dict):
+        return "normal"
+    return str(metadata.get("agent_adaptive_mode") or "normal")
+
+
+def _needs_llm_verify(state: AgentState, config: RunnableConfig) -> tuple[bool, str]:
+    if not CONDITIONAL_VERIFY:
+        return True, "conditional verifier disabled"
+    if _adaptive_mode(config) == "deterministic_only":
+        return False, "adaptive pressure mode uses deterministic verifier only"
+    execution = state.execution
+    if execution is None or not execution.ok:
+        return False, "deterministic rejection already handles missing/error execution"
+
+    rows = execution.rows or []
+    question = state.question.lower()
+    sql = state.sql.lower()
+    if not SEMANTIC_LLM_VERIFY:
+        return False, "semantic LLM verifier disabled for SLO mode"
+    if not rows and not _is_aggregate_sql(state.sql):
+        return True, "zero rows for a non-aggregate answer"
+    if re.search(r"\bselect\s+\*", sql):
+        return True, "SELECT * needs semantic verifier review"
+    if execution.row_count >= VERIFY_MANY_ROWS_THRESHOLD and not any(
+        cue in question for cue in ("all", "list", "show", "which", "what are")
+    ):
+        return True, "many rows returned without an obvious list request"
+    if "limit" not in sql and any(cue in question for cue in ("top ", "highest", "lowest", "first", "largest", "smallest")):
+        return True, "ranking/superlative question without LIMIT"
+    if "order by" not in sql and any(cue in question for cue in ("top ", "highest", "lowest", "largest", "smallest")):
+        return True, "ranking/superlative question without ORDER BY"
+    return False, "deterministic checks passed"
+
+
 def _deterministic_verify_issue(state: AgentState) -> str | None:
     execution = state.execution
     if execution is None:
@@ -423,6 +531,12 @@ def _deterministic_verify_issue(state: AgentState) -> str | None:
             "Aggregate result is NULL/empty. Reconsider the measure column and filters. "
             "For financial crime questions, use \"district\".\"A15\" for crimes in 1995 "
             "and \"district\".\"A16\" for crimes in 1996."
+        )
+
+    if not rows and not _is_aggregate_sql(state.sql) and not _is_aggregate_question(state.question):
+        return (
+            "Zero-row result for a non-aggregate question. Reconsider exact literals, "
+            "date formats, joins, and filter columns."
         )
 
     if (
@@ -496,14 +610,10 @@ def _deterministic_verify_issue(state: AgentState) -> str | None:
 
 
 def generate_sql_node(state: AgentState, config: RunnableConfig) -> dict:
-    """Worked example - the other LLM nodes follow this same shape.
+    """Generate the first SQL candidate for the question.
 
-    Build messages from the prompts, call the shared llm(), extract the SQL,
-    and return only the state fields you changed. `iteration` is bumped here
-    (and in revise) so route_after_verify can enforce MAX_ITERATIONS.
-
-    This node is wired and ready; fill in GENERATE_SQL_SYSTEM / GENERATE_SQL_USER
-    in prompts.py to make it produce real queries.
+    Build messages from the tuned prompts, call the shared llm(), extract the
+    SQL, and bump `iteration` so route_after_verify can enforce MAX_ITERATIONS.
     """
     with timed_node("generate_sql"):
         response = llm().invoke(
@@ -525,7 +635,7 @@ def generate_sql_node(state: AgentState, config: RunnableConfig) -> dict:
 
 
 def execute_node(state: AgentState) -> dict:
-    """Provided. Runs the SQL and stores the result."""
+    """Run the current SQL and store the SQLite execution result."""
     with timed_node("execute"):
         return {"execution": execute_sql(state.db_id, state.sql)}
 
@@ -533,18 +643,13 @@ def execute_node(state: AgentState) -> dict:
 def verify_node(state: AgentState, config: RunnableConfig) -> dict:
     """Decide whether state.execution plausibly answers state.question.
 
-    Follow the generate_sql_node pattern: build messages from the VERIFY_*
-    prompts, call llm(), parse the reply. Ask the model for a small JSON object
-    like {"ok": bool, "issue": str} and parse it defensively - the model may
-    wrap it in prose or fences. state.execution.render() gives you a compact
-    view of the rows or error to feed into the prompt.
+    Deterministic checks run first. Clean, normal-shaped executions can be
+    accepted without an LLM verifier; ambiguous cases use a compact verifier
+    prompt and the separate verifier_llm() client.
 
     Return: {"verify_ok": <bool>, "verify_issue": <str>}.
-    What counts as "not plausible" is yours to define - see the Phase 3 targets
-    in the README.
     """
     with timed_node("verify"):
-        execution = state.execution.render() if state.execution else "ERROR: SQL was not executed."
         deterministic_issue = _deterministic_verify_issue(state)
         if deterministic_issue:
             return {
@@ -557,14 +662,30 @@ def verify_node(state: AgentState, config: RunnableConfig) -> dict:
                     "source": "deterministic",
                 }],
             }
-        response = llm().invoke(
+        needs_llm, reason = _needs_llm_verify(state, config)
+        if not needs_llm:
+            issue = f"Accepted by deterministic verifier: {reason}."
+            return {
+                "verify_ok": True,
+                "verify_issue": issue,
+                "history": state.history + [{
+                    "node": "verify",
+                    "ok": True,
+                    "issue": issue,
+                    "source": "deterministic",
+                }],
+            }
+
+        compact_schema = _compact_schema_for_verifier(state)
+        compact_execution = _execution_metadata(state.execution)
+        response = verifier_llm().invoke(
             [
                 ("system", prompts.VERIFY_SYSTEM),
                 ("user", prompts.VERIFY_USER.format(
-                    schema=state.schema,
+                    schema=compact_schema,
                     question=state.question,
                     sql=state.sql,
-                    execution=execution,
+                    execution=compact_execution,
                 )),
             ],
             config=config,
@@ -581,6 +702,8 @@ def verify_node(state: AgentState, config: RunnableConfig) -> dict:
                 "node": "verify",
                 "ok": ok,
                 "issue": issue,
+                "source": "llm",
+                "reason": reason,
                 "raw": response.content,
             }],
         }
@@ -653,7 +776,8 @@ def route_after_verify(state: AgentState) -> str:
     Two reasons to end: the verifier was happy (state.verify_ok), or you've hit
     the iteration cap (state.iteration >= MAX_ITERATIONS). Otherwise, revise.
     """
-    if state.verify_ok or state.iteration >= MAX_ITERATIONS:
+    revision_count = max(0, state.iteration - 1)
+    if state.verify_ok or state.iteration >= MAX_ITERATIONS or revision_count >= MAX_REVISIONS:
         return "end"
     return "revise"
 
@@ -687,8 +811,7 @@ graph = build_graph()
 def run_fast_path(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     """Latency-optimized serving path: generate once, execute once, skip verify/revise."""
     with timed_node("attach_schema"):
-        schema = render_schema(state.db_id)
-        state.schema = trim_schema_for_question(schema, state.question) + _render_domain_aliases(state.db_id)
+        state.schema = retrieve_schema_for_question(state.db_id, state.question) + _render_domain_aliases(state.db_id)
 
     generated = generate_sql_node(state, config)
     state.sql = generated["sql"]

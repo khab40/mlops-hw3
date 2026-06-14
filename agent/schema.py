@@ -1,9 +1,12 @@
-"""Schema-rendering helper (provided complete).
+"""Schema-rendering and retrieval helpers.
 
 Loads the schema directly from sqlite and renders quoted CREATE TABLE
 text suitable for prompt context. Identifiers are always double-quoted
 so reserved-word table/column names (e.g. `order`) don't break either
 the PRAGMA introspection here or the SQL the model emits later.
+
+Large schemas can be reduced with question-term scoring plus one-hop
+foreign-key neighborhoods before being sent to the model.
 """
 from __future__ import annotations
 
@@ -16,6 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DB_DIR = ROOT / "data" / "bird"
 SCHEMA_MAX_CHARS = int(os.environ.get("AGENT_SCHEMA_MAX_CHARS", "12000"))
+SCHEMA_TOP_TABLES = int(os.environ.get("AGENT_SCHEMA_TOP_TABLES", "8"))
 
 
 def db_path(db_id: str) -> Path:
@@ -68,14 +72,84 @@ def _question_terms(question: str) -> set[str]:
     return {t for t in re.findall(r"[a-zA-Z_][a-zA-Z0-9_]+", question.lower()) if len(t) > 2}
 
 
+def _table_name_from_chunk(chunk: str) -> str | None:
+    match = re.search(r'CREATE TABLE "((?:[^"]|"")+)".*?\(', chunk, re.DOTALL)
+    if not match:
+        return None
+    return match.group(1).replace('""', '"')
+
+
+def _schema_chunks(schema: str) -> tuple[str, dict[str, str]]:
+    chunks = re.split(r"\n(?=CREATE TABLE )", schema)
+    header = chunks[0].split("\nCREATE TABLE ", 1)[0].strip()
+    tables: dict[str, str] = {}
+    for chunk in chunks:
+        if not chunk.startswith("CREATE TABLE "):
+            continue
+        name = _table_name_from_chunk(chunk)
+        if name:
+            tables[name] = chunk
+    return header, tables
+
+
+def retrieve_schema_for_question(db_id: str, question: str, max_chars: int = SCHEMA_MAX_CHARS) -> str:
+    """Retrieve a compact schema slice by question terms plus FK neighborhoods."""
+    schema = render_schema(db_id)
+    if max_chars <= 0 or len(schema) <= max_chars:
+        return schema
+
+    header, table_chunks = _schema_chunks(schema)
+    terms = _question_terms(question)
+    if not table_chunks:
+        return trim_schema_for_question(schema, question, max_chars=max_chars)
+
+    scores: dict[str, int] = {}
+    neighbors: dict[str, set[str]] = {table: set() for table in table_chunks}
+    for table, chunk in table_chunks.items():
+        lowered = chunk.lower()
+        table_words = set(re.findall(r"[a-zA-Z_][a-zA-Z0-9_]+", table.lower()))
+        table_score = sum(4 for term in terms if term in table_words or term in table.lower())
+        content_score = sum(1 for term in terms if term in lowered)
+        scores[table] = table_score + content_score
+        for ref in re.findall(r'REFERENCES "((?:[^"]|"")+)"', chunk):
+            ref_table = ref.replace('""', '"')
+            if ref_table in table_chunks:
+                neighbors[table].add(ref_table)
+                neighbors[ref_table].add(table)
+
+    ranked = sorted(table_chunks, key=lambda table: (scores[table], -len(table_chunks[table])), reverse=True)
+    selected: list[str] = []
+    seen: set[str] = set()
+    for table in ranked[:SCHEMA_TOP_TABLES]:
+        if scores[table] <= 0 and selected:
+            continue
+        for candidate in (table, *sorted(neighbors[table], key=lambda n: scores[n], reverse=True)):
+            if candidate not in seen:
+                selected.append(candidate)
+                seen.add(candidate)
+
+    parts = [
+        header,
+        "-- Schema retrieved for the question; relevant tables and one-hop foreign-key neighbors are shown first.",
+    ]
+    size = sum(len(part) + 1 for part in parts)
+    for table in selected + [table for table in ranked if table not in seen]:
+        chunk = table_chunks[table]
+        added = len(chunk) + 1
+        if size + added > max_chars:
+            continue
+        parts.append(chunk)
+        size += added
+    return "\n".join(parts)
+
+
 def trim_schema_for_question(schema: str, question: str, max_chars: int = SCHEMA_MAX_CHARS) -> str:
     """Keep prompt context bounded by prioritizing tables that match question terms."""
     if max_chars <= 0 or len(schema) <= max_chars:
         return schema
 
-    chunks = re.split(r"\n(?=CREATE TABLE )", schema)
-    header = chunks[0].split("\nCREATE TABLE ", 1)[0].strip()
-    table_chunks = [c for c in chunks if c.startswith("CREATE TABLE ")]
+    header, chunks_by_table = _schema_chunks(schema)
+    table_chunks = list(chunks_by_table.values())
     terms = _question_terms(question)
 
     def score(chunk: str) -> tuple[int, int]:
