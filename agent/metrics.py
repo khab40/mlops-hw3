@@ -98,6 +98,15 @@ ANSWER_OUTCOMES_TOTAL = Counter(
     "Completed answer outcomes.",
     ["outcome"],
 )
+ANSWER_CACHE_EVENTS_TOTAL = Counter(
+    "agent_answer_cache_events_total",
+    "Answer cache events.",
+    ["event"],
+)
+ANSWER_CACHE_SIZE = Gauge(
+    "agent_answer_cache_size",
+    "Current number of entries in the in-process answer cache.",
+)
 
 
 def normalize_path(path: str) -> str:

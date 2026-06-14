@@ -1,11 +1,8 @@
 """Prompt templates for the agent nodes.
 
-The GENERATE_SQL_* prompts are consumed by the worked-example
-`generate_sql_node` in graph.py via `.format(schema=..., question=...)`, so
-keep those placeholders intact. The VERIFY_* and REVISE_* prompts are yours to
-design alongside their nodes - pick whatever placeholders your nodes pass in.
-
-Filling these in is part of Phase 3.
+The graph formats these templates with schema, question, SQL, execution
+metadata, and verifier issue fields. Keep the placeholders intact when tuning
+prompt text.
 """
 
 GENERATE_SQL_SYSTEM = """You are a careful text-to-SQL generator for SQLite.

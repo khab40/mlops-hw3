@@ -11,7 +11,8 @@ The diagrams below intentionally use a conservative Mermaid subset for VS Code p
 ```mermaid
 flowchart LR
     Analyst["Analyst or eval client"] -->|POST answer| AgentAPI["FastAPI agent server"]
-    AgentAPI --> Gate["Single-flight and admission control"]
+    AgentAPI --> Cache["Answer cache"]
+    Cache --> Gate["Single-flight and admission control"]
     Gate --> Graph["LangGraph workflow or fast path"]
     Graph -->|schema lookup| Schema["Schema retrieval and value hints"]
     Schema --> Bird["BIRD SQLite files"]
@@ -67,12 +68,14 @@ flowchart LR
 
 ## Use Case: Answer a Text-to-SQL Request
 
-The runtime path starts at `POST /answer`. The server coalesces identical in-flight `(db, normalized question)` requests when `AGENT_SINGLEFLIGHT=true`, admits work through an in-flight semaphore, and runs blocking graph work in an explicit executor. Under adaptive pressure it can switch from normal graph mode to deterministic-only verification or to the fast path. The response returns the final SQL, rows, iteration count, status, and history.
+The runtime path starts at `POST /answer`. The server first checks a TTL-bounded in-process LRU cache for successful executed answers keyed by `(db, normalized question)`, with hit/miss/store/evict counters exposed to Prometheus. It then coalesces identical in-flight requests when `AGENT_SINGLEFLIGHT=true`, admits work through an in-flight semaphore, and runs blocking graph work in an explicit executor. Under adaptive pressure it can switch from normal graph mode to deterministic-only verification or to the fast path. The response returns the final SQL, rows, iteration count, status, and history.
 
 ```mermaid
 flowchart TD
     Client["Client"] -->|question db tags| API["FastAPI answer endpoint"]
-    API --> Coalesce["Single-flight by db and question"]
+    API --> Cache["Answer cache lookup"]
+    Cache -->|hit| Response["Return SQL rows iterations history"]
+    Cache -->|miss| Coalesce["Single-flight by db and question"]
     Coalesce --> Admission["Admission semaphore"]
     Admission --> Mode["Choose normal deterministic-only or fast path"]
     Mode --> State["Create agent state"]
@@ -80,7 +83,8 @@ flowchart TD
     Schema --> Generate["Generate SQL with vLLM"]
     Generate --> Execute["Execute SQL in SQLite"]
     Execute --> Verify["Deterministic and optional LLM verify"]
-    Verify --> Response["Return SQL rows iterations history"]
+    Verify --> StoreCache["Cache successful answer"]
+    StoreCache --> Response
     Response --> Client
 ```
 
@@ -105,11 +109,13 @@ flowchart TD
 
 ## Use Case: Fast Path and Adaptive Pressure
 
-For the Phase 6 SLO, `agent/server.py` supports a lower-latency path controlled by `AGENT_FAST_PATH` or adaptive pressure metadata. `AGENT_ADAPTIVE_PRESSURE=true` moves admitted requests into `deterministic_only` mode at `AGENT_DETERMINISTIC_ONLY_AT` and into `fast_path` mode at `AGENT_PRESSURE_FAST_PATH_AT`. This protects tail latency under load, with the quality tradeoff documented in `REPORT.md`.
+For the Phase 6 SLO, `agent/server.py` supports a lower-latency path controlled by `AGENT_FAST_PATH` or adaptive pressure metadata. `AGENT_ADAPTIVE_PRESSURE=true` moves admitted requests into `deterministic_only` mode at `AGENT_DETERMINISTIC_ONLY_AT` and into `fast_path` mode at `AGENT_PRESSURE_FAST_PATH_AT`. The answer cache and single-flight path remove duplicate work before it reaches vLLM. This protects tail latency under load, with the quality tradeoff documented in `REPORT.md`.
 
 ```mermaid
 flowchart LR
-    Request["Answer request"] --> Pressure["Read admitted count"]
+    Request["Answer request"] --> Cache["Answer cache"]
+    Cache -->|hit| Response["Response"]
+    Cache -->|miss| Pressure["Read admitted count"]
     Pressure -->|normal| FullGraph["Full graph"]
     Pressure -->|moderate pressure| DetOnly["Graph with deterministic verify"]
     Pressure -->|high pressure| FastPath["Generate and execute only"]
@@ -120,7 +126,7 @@ flowchart LR
 
 ## Use Case: Observe Serving Health
 
-Prometheus scrapes vLLM's `/metrics` endpoint through `host.docker.internal:8000` and the agent server's `/metrics` endpoint on port `8001`. Grafana loads the Prometheus datasource and serving dashboard from `infra/grafana/provisioning`.
+Prometheus scrapes vLLM's `/metrics` endpoint through `host.docker.internal:8000` and the agent server's `/metrics` endpoint on port `8001`. Grafana loads the Prometheus datasource and serving dashboard from `infra/grafana/provisioning`. Agent metrics include request status, in-flight pressure, graph and node latency, answer outcomes, iteration counts, and answer-cache hit/miss/store/size signals.
 
 ```mermaid
 flowchart LR

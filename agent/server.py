@@ -13,7 +13,9 @@ import atexit
 import os
 import re
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 
 from dotenv import load_dotenv
@@ -27,6 +29,8 @@ load_dotenv()
 from agent.graph import AgentState, graph, run_fast_path  # noqa: E402
 from agent.metrics import (  # noqa: E402
     AGENT_HEALTH_UP,
+    ANSWER_CACHE_EVENTS_TOTAL,
+    ANSWER_CACHE_SIZE,
     ANSWER_ITERATIONS,
     ANSWER_OUTCOMES_TOTAL,
     GRAPH_DURATION,
@@ -54,6 +58,9 @@ AGENT_FAST_PATH = os.environ.get("AGENT_FAST_PATH", "false").lower() in {"1", "t
 AGENT_MAX_INFLIGHT = int(os.environ.get("AGENT_MAX_INFLIGHT", str(AGENT_MAX_WORKERS)))
 AGENT_QUEUE_TIMEOUT_SECONDS = float(os.environ.get("AGENT_QUEUE_TIMEOUT_SECONDS", "0.25"))
 AGENT_SINGLEFLIGHT = os.environ.get("AGENT_SINGLEFLIGHT", "true").lower() in {"1", "true", "yes"}
+AGENT_ANSWER_CACHE = os.environ.get("AGENT_ANSWER_CACHE", "true").lower() in {"1", "true", "yes"}
+AGENT_ANSWER_CACHE_MAX_SIZE = int(os.environ.get("AGENT_ANSWER_CACHE_MAX_SIZE", "4096"))
+AGENT_ANSWER_CACHE_TTL_SECONDS = float(os.environ.get("AGENT_ANSWER_CACHE_TTL_SECONDS", "3600"))
 AGENT_ADAPTIVE_PRESSURE = os.environ.get("AGENT_ADAPTIVE_PRESSURE", "true").lower() in {"1", "true", "yes"}
 AGENT_DETERMINISTIC_ONLY_AT = int(os.environ.get("AGENT_DETERMINISTIC_ONLY_AT", str(max(1, AGENT_MAX_INFLIGHT // 4))))
 AGENT_PRESSURE_FAST_PATH_AT = int(os.environ.get("AGENT_PRESSURE_FAST_PATH_AT", str(max(2, AGENT_MAX_INFLIGHT // 2))))
@@ -65,6 +72,16 @@ _admission = asyncio.Semaphore(AGENT_MAX_INFLIGHT)
 _admitted_count = 0
 _singleflight_lock = asyncio.Lock()
 _singleflight: dict[tuple[str, str], asyncio.Future] = {}
+_cache_lock = asyncio.Lock()
+
+
+@dataclass
+class _CacheEntry:
+    final: dict[str, Any]
+    expires_at: float
+
+
+_answer_cache: OrderedDict[tuple[str, str], _CacheEntry] = OrderedDict()
 atexit.register(_graph_executor.shutdown, wait=False, cancel_futures=True)
 
 app = FastAPI()
@@ -105,6 +122,54 @@ def _pressure_mode() -> str:
     if _admitted_count >= AGENT_DETERMINISTIC_ONLY_AT:
         return "deterministic_only"
     return "normal"
+
+
+def _cache_enabled() -> bool:
+    return AGENT_ANSWER_CACHE and AGENT_ANSWER_CACHE_MAX_SIZE > 0 and AGENT_ANSWER_CACHE_TTL_SECONDS > 0
+
+
+def _final_is_cacheable(final: dict[str, Any]) -> bool:
+    execution = final.get("execution")
+    return bool(execution is not None and getattr(execution, "ok", False))
+
+
+def _mark_cache_hit(final: dict[str, Any]) -> dict[str, Any]:
+    history = list(final.get("history", []))
+    history.append({"node": "answer_cache", "ok": True})
+    return {**final, "history": history}
+
+
+async def _cache_get(key: tuple[str, str]) -> dict[str, Any] | None:
+    if not _cache_enabled():
+        return None
+    now = time.monotonic()
+    async with _cache_lock:
+        entry = _answer_cache.get(key)
+        if entry is None:
+            ANSWER_CACHE_EVENTS_TOTAL.labels(event="miss").inc()
+            return None
+        if entry.expires_at <= now:
+            _answer_cache.pop(key, None)
+            ANSWER_CACHE_SIZE.set(len(_answer_cache))
+            ANSWER_CACHE_EVENTS_TOTAL.labels(event="expired").inc()
+            return None
+        _answer_cache.move_to_end(key)
+        ANSWER_CACHE_EVENTS_TOTAL.labels(event="hit").inc()
+        return _mark_cache_hit(entry.final)
+
+
+async def _cache_put(key: tuple[str, str] | None, final: dict[str, Any]) -> None:
+    if key is None or not _cache_enabled() or not _final_is_cacheable(final):
+        return
+    expires_at = time.monotonic() + AGENT_ANSWER_CACHE_TTL_SECONDS
+    async with _cache_lock:
+        _answer_cache[key] = _CacheEntry(final=final, expires_at=expires_at)
+        _answer_cache.move_to_end(key)
+        ANSWER_CACHE_EVENTS_TOTAL.labels(event="store").inc()
+        while len(_answer_cache) > AGENT_ANSWER_CACHE_MAX_SIZE:
+            _answer_cache.popitem(last=False)
+            ANSWER_CACHE_EVENTS_TOTAL.labels(event="evict").inc()
+        ANSWER_CACHE_SIZE.set(len(_answer_cache))
 
 
 @app.middleware("http")
@@ -208,8 +273,12 @@ def health() -> dict[str, str]:
 
 @app.post("/answer", response_model=AnswerResponse)
 async def answer(req: AnswerRequest) -> AnswerResponse:
+    key = _answer_key(req)
+    cached = await _cache_get(key)
+    if cached is not None:
+        return _response_from_final(cached)
+
     if AGENT_SINGLEFLIGHT:
-        key = _answer_key(req)
         loop = asyncio.get_running_loop()
         leader = False
         async with _singleflight_lock:
@@ -223,7 +292,6 @@ async def answer(req: AnswerRequest) -> AnswerResponse:
             final = await future
             return _response_from_final(final)
     else:
-        key = None
         future = None
         leader = True
 
@@ -248,6 +316,7 @@ async def answer(req: AnswerRequest) -> AnswerResponse:
         GRAPH_EXECUTOR_QUEUE_DEPTH.set(_executor_queue_depth())
         loop = asyncio.get_running_loop()
         final = await loop.run_in_executor(_graph_executor, _run_graph, state, config)
+        await _cache_put(key, final)
         if future is not None and not future.done():
             future.set_result(final)
     except asyncio.TimeoutError:

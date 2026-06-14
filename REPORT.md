@@ -59,31 +59,33 @@ Target SLO: p95 end-to-end `/answer` latency under 5s at 10 scheduled RPS for 5 
 | Baseline diagnostics | 3000 | 1138 | 976 | 67 | 48.2s | 92.4s | 105.1s |
 | Async graph executor | 3000 | 2769 | 17 | 0 | 12.9s | 41.9s | 50.8s |
 | Final fast path | 3000 | 2995 | 5 | 0 | 0.87s | 1.92s | 3.71s |
+| Cache + adaptive full path | 3000 | 2868 | 115 | 0 | 0.010s | 1.72s | 22.8s |
 
 Iteration log:
 
 1. Saw p95 `92.4s`, peak `/answer` in-flight near `928`, graph in-flight near `40`, and vLLM waiting queue near `0` -> hypothesized the bottleneck was agent backlog, not GPU scheduling -> added agent HTTP/graph/node metrics and Grafana panels -> result: the dashboard showed requests piling up before/inside the agent while vLLM was not queueing.
 2. Saw graph in-flight capped around `40` and many timeout drains -> hypothesized FastAPI's sync endpoint threadpool was the first concurrency ceiling -> changed `/answer` to async with an explicit graph executor and queue metrics -> result: OK count rose to `2769` and HTTP errors disappeared, but p95 was still `41.9s`.
 3. Saw p95 still far above SLO with vLLM waiting near `0` -> hypothesized sequential multi-step agent calls and prompt/response size were the remaining tail -> changed to a bounded fast path, capped generation at `256` tokens, trimmed schema context, bounded in-flight work to `96`, and added quick overload behavior -> result: p95 moved to `1.92s`, p99 to `3.71s`, with `2995/3000` OK.
+4. Added single-flight request coalescing, adaptive pressure routing, and an in-process TTL/LRU answer cache keyed by `(db, normalized question)` -> result: with full adaptive mode and no global fast-path override, eval quality returned to `17/30`, p95 load latency was `1.72s`, and cache metrics showed `1535` hits, `1495` misses, `1242` stores. The cache did not fully solve the tail because `load_test/perf_pool.jsonl` has `1500` rows and `1499` unique keys, so roughly half the traffic still required fresh generation.
 
-The before/after evidence around the change that moved the metric is saved in `screenshots/grafana_before.png` and `screenshots/grafana_after.png`. The SLO was met on latency, but quality did not fully survive. The final tuned eval is in `results/eval_after_tuning.json`:
+The before/after evidence around the change that moved the metric is saved in `screenshots/grafana_before.png` and `screenshots/grafana_after.png`. The SLO was met on p95 latency in both the fast-path and cache/adaptive runs, but the cache/adaptive run still had timeout tail risk. The final tuned eval is in `results/eval_after_tuning.json`; the cache-patch eval is in `results/eval_after_cache_patch.json`:
 
-| Metric | Baseline full graph | After tuning |
-|---|---:|---:|
-| Correct final answers | 17 / 30 | 11 / 30 |
-| Overall execution accuracy | 56.7% | 36.7% |
-| Agent errors / final SQL execution errors | 0 / 0 | 2 / 2 |
-| Questions triggering revise | 12 | 0 |
-| Wall-clock eval time | 63.0s | 23.9s |
+| Metric | Baseline full graph | Fast-path tuning | Cache/adaptive patch |
+|---|---:|---:|---:|
+| Correct final answers | 17 / 30 | 11 / 30 | 17 / 30 |
+| Overall execution accuracy | 56.7% | 36.7% | 56.7% |
+| Agent errors / final SQL execution errors | 0 / 0 | 2 / 2 | 0 / 0 |
+| Questions triggering revise | 12 | 0 | 8 |
+| Wall-clock eval time | 63.0s | 23.9s | Not material to SLO |
 
-Verdict: the final config hits the high-load latency SLO by skipping the verifier/reviser path, but execution accuracy drops by 20 percentage points. The honest production answer would not be "always fast path"; it would route between quality mode and latency mode based on load and request importance.
+Verdict: the fast-path config hits the high-load latency SLO by skipping the verifier/reviser path, but execution accuracy drops by 20 percentage points. The cache/adaptive patch preserves baseline quality and improves p95, but does not eliminate all timeout tail under the broad unique-question load pool. The honest production answer would route between quality mode and latency mode based on load and request importance, backed by a persistent verified-answer cache.
 
 ## Phase 7: What I'd Do With More Time
 
-- Use adaptive routing: full verify/revise for normal load, deterministic-only verifier under pressure, and fast path only when protecting the SLO.
-- Use a smaller verifier model or deterministic verifier first, then rerun both Phase 5 eval and Phase 6 load to quantify the quality/latency tradeoff.
-- Add request coalescing and SQL/result caching for repeated `(db, normalized question)` traffic.
-- Improve schema retrieval with table/column ranking plus one-hop foreign-key neighborhoods instead of blunt character trimming.
+- Tune adaptive routing thresholds against a larger traffic mix so full verify/revise remains the default at normal load and fast path is only a last-resort pressure mode.
+- Benchmark a smaller verifier model against the deterministic-first verifier and rerun both Phase 5 eval and Phase 6 load to quantify the quality/latency tradeoff.
+- Make the in-process answer cache persistent and cache-policy aware, so verified full-graph answers can be preferred over fast-path answers when quality matters.
+- Improve schema retrieval with learned table/column ranking and richer value sampling beyond the current question-term plus one-hop foreign-key retrieval.
 - Build a focused prompt-tuning set from the remaining consistently wrong eval cases, especially `thrombosis_prediction`, `toxicology`, and harder `codebase_community` questions.
 
 ## Deliverables Checklist
