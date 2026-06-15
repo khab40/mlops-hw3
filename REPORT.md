@@ -54,12 +54,14 @@ The loop earned its keep: stopping after the first SQL would have passed 13 ques
 
 Target SLO: p95 end-to-end `/answer` latency under 5s at 10 scheduled RPS for 5 minutes. The load driver schedules 3000 requests over the 300s window; its achieved-RPS field includes drain time, so I use scheduled requests for the SLO load level and p95/quality for the verdict.
 
-| Run | Scheduled | OK | Timeouts | HTTP errors | p50 | p95 | p99 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Baseline diagnostics | 3000 | 1138 | 976 | 67 | 48.2s | 92.4s | 105.1s |
-| Async graph executor | 3000 | 2769 | 17 | 0 | 12.9s | 41.9s | 50.8s |
-| Final fast path | 3000 | 2995 | 5 | 0 | 0.87s | 1.92s | 3.71s |
-| Cache + adaptive full path | 3000 | 2868 | 115 | 0 | 0.010s | 1.72s | 22.8s |
+| Run | Load | OK / scheduled | Errors / timeouts | p50 | p95 SLO | p99 | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Baseline diagnostics | 10 RPS, 300s | 1138 / 3000 | 67 HTTP, 976 timeout | 48.2s | 92.4s | 105.1s | Failed |
+| Async graph executor | 10 RPS, 300s | 2769 / 3000 | 0 HTTP, 17 timeout | 12.9s | 41.9s | 50.8s | Failed |
+| Final fast path | 10 RPS, 300s | 2995 / 3000 | 0 HTTP, 5 timeout | 0.87s | 1.92s | 3.71s | Met latency SLO |
+| Cache + adaptive full path | 10 RPS, 300s | 2868 / 3000 | 0 HTTP, 115 timeout | 0.010s | 1.72s | 22.8s | Met p95, failed reliability tail |
+
+SLO read: p95 below `5s` was achieved by both the fast-path and cache/adaptive modes. The cleanest SLO run is the final fast path because it kept failures low (`2995/3000` OK, `5` timeouts), while the cache/adaptive run preserved quality but still had a long timeout tail.
 
 Iteration log:
 

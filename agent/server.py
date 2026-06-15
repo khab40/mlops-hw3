@@ -28,6 +28,8 @@ load_dotenv()
 
 from agent.graph import AgentState, graph, run_fast_path  # noqa: E402
 from agent.metrics import (  # noqa: E402
+    AGENT_CIRCUIT_BREAKER_EVENTS_TOTAL,
+    AGENT_CIRCUIT_BREAKER_OPEN,
     AGENT_HEALTH_UP,
     ANSWER_CACHE_EVENTS_TOTAL,
     ANSWER_CACHE_SIZE,
@@ -64,12 +66,17 @@ AGENT_ANSWER_CACHE_TTL_SECONDS = float(os.environ.get("AGENT_ANSWER_CACHE_TTL_SE
 AGENT_ADAPTIVE_PRESSURE = os.environ.get("AGENT_ADAPTIVE_PRESSURE", "true").lower() in {"1", "true", "yes"}
 AGENT_DETERMINISTIC_ONLY_AT = int(os.environ.get("AGENT_DETERMINISTIC_ONLY_AT", str(max(1, AGENT_MAX_INFLIGHT // 4))))
 AGENT_PRESSURE_FAST_PATH_AT = int(os.environ.get("AGENT_PRESSURE_FAST_PATH_AT", str(max(2, AGENT_MAX_INFLIGHT // 2))))
+AGENT_CIRCUIT_BREAKER = os.environ.get("AGENT_CIRCUIT_BREAKER", "true").lower() in {"1", "true", "yes"}
+AGENT_CIRCUIT_OPEN_AT = int(os.environ.get("AGENT_CIRCUIT_OPEN_AT", str(max(3, (AGENT_MAX_INFLIGHT * 3) // 4))))
+AGENT_CIRCUIT_CLOSE_AT = int(os.environ.get("AGENT_CIRCUIT_CLOSE_AT", str(max(1, AGENT_MAX_INFLIGHT // 2))))
+AGENT_CIRCUIT_COOLDOWN_SECONDS = float(os.environ.get("AGENT_CIRCUIT_COOLDOWN_SECONDS", "10"))
 _graph_executor = ThreadPoolExecutor(
     max_workers=AGENT_MAX_WORKERS,
     thread_name_prefix="agent-graph",
 )
 _admission = asyncio.Semaphore(AGENT_MAX_INFLIGHT)
 _admitted_count = 0
+_circuit_open_until = 0.0
 _singleflight_lock = asyncio.Lock()
 _singleflight: dict[tuple[str, str], asyncio.Future] = {}
 _cache_lock = asyncio.Lock()
@@ -88,6 +95,7 @@ app = FastAPI()
 app.mount("/metrics", make_asgi_app())
 AGENT_HEALTH_UP.set(1)
 GRAPH_EXECUTOR_MAX_WORKERS.set(AGENT_MAX_WORKERS)
+AGENT_CIRCUIT_BREAKER_OPEN.set(0)
 
 
 def _executor_queue_depth() -> int:
@@ -122,6 +130,34 @@ def _pressure_mode() -> str:
     if _admitted_count >= AGENT_DETERMINISTIC_ONLY_AT:
         return "deterministic_only"
     return "normal"
+
+
+def _pressure_level() -> int:
+    return _admitted_count + _executor_queue_depth()
+
+
+def _circuit_open() -> bool:
+    if not AGENT_CIRCUIT_BREAKER:
+        AGENT_CIRCUIT_BREAKER_OPEN.set(0)
+        return False
+
+    now = time.monotonic()
+    pressure = _pressure_level()
+    global _circuit_open_until
+    if pressure >= AGENT_CIRCUIT_OPEN_AT:
+        if _circuit_open_until <= now:
+            AGENT_CIRCUIT_BREAKER_EVENTS_TOTAL.labels(event="open").inc()
+        _circuit_open_until = now + AGENT_CIRCUIT_COOLDOWN_SECONDS
+
+    if _circuit_open_until > now and pressure > AGENT_CIRCUIT_CLOSE_AT:
+        AGENT_CIRCUIT_BREAKER_OPEN.set(1)
+        return True
+
+    if _circuit_open_until > 0:
+        AGENT_CIRCUIT_BREAKER_EVENTS_TOTAL.labels(event="close").inc()
+    _circuit_open_until = 0.0
+    AGENT_CIRCUIT_BREAKER_OPEN.set(0)
+    return False
 
 
 def _cache_enabled() -> bool:
@@ -284,6 +320,9 @@ async def answer(req: AnswerRequest) -> AnswerResponse:
         async with _singleflight_lock:
             future = _singleflight.get(key)
             if future is None:
+                if _circuit_open():
+                    AGENT_CIRCUIT_BREAKER_EVENTS_TOTAL.labels(event="reject").inc()
+                    raise HTTPException(status_code=503, detail="agent circuit breaker open")
                 future = loop.create_future()
                 future.add_done_callback(_consume_future_exception)
                 _singleflight[key] = future
@@ -292,6 +331,9 @@ async def answer(req: AnswerRequest) -> AnswerResponse:
             final = await future
             return _response_from_final(final)
     else:
+        if _circuit_open():
+            AGENT_CIRCUIT_BREAKER_EVENTS_TOTAL.labels(event="reject").inc()
+            raise HTTPException(status_code=503, detail="agent circuit breaker open")
         future = None
         leader = True
 

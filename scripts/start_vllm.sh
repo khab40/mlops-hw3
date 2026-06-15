@@ -5,11 +5,28 @@
 
 set -euo pipefail
 
-MODEL="Qwen/Qwen3-30B-A3B-Instruct-2507"
+if [[ -f .env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
+fi
 
-exec uv run python -m vllm.entrypoints.openai.api_server \
+MODEL="${VLLM_MODEL:-defog/sqlcoder-7b-2}"
+CHAT_TEMPLATE="${VLLM_CHAT_TEMPLATE:-}"
+if [[ -z "$CHAT_TEMPLATE" && "$MODEL" == defog/sqlcoder* ]]; then
+    CHAT_TEMPLATE="scripts/sqlcoder_chat_template.jinja"
+fi
+
+CMD=(uv run python -m vllm.entrypoints.openai.api_server
     --model "$MODEL" \
     --host 0.0.0.0 \
     --port 8000 \
     --max-model-len 8192 \
-    --gpu-memory-utilization 0.90
+    --gpu-memory-utilization 0.90)
+
+if [[ -n "$CHAT_TEMPLATE" ]]; then
+    CMD+=(--chat-template "$CHAT_TEMPLATE")
+fi
+
+exec "${CMD[@]}"

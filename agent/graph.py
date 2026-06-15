@@ -811,7 +811,11 @@ graph = build_graph()
 def run_fast_path(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     """Latency-optimized serving path: generate once, execute once, skip verify/revise."""
     with timed_node("attach_schema"):
-        state.schema = retrieve_schema_for_question(state.db_id, state.question) + _render_domain_aliases(state.db_id)
+        state.schema = (
+            retrieve_schema_for_question(state.db_id, state.question)
+            + _render_domain_aliases(state.db_id)
+            + _render_value_hints(state.db_id, state.question)
+        )
 
     generated = generate_sql_node(state, config)
     state.sql = generated["sql"]

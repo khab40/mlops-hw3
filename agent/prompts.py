@@ -14,23 +14,30 @@ Rules:
 - Do not invent columns, tables, CTE inputs, or values that are not implied by the question.
 - When the schema includes domain aliases for opaque columns, use those meanings over guessing from column names.
 - When the schema includes exact value hints, use those spellings and casing for string filters.
+- Silently decide the answer shape before writing SQL: projection/list, single aggregate, grouped aggregate, ranking/top-N, comparison, or percentage.
 - Preserve the requested output columns and their order exactly.
 - Use DISTINCT when a join can duplicate the requested entity or value.
 - Do not add LIMIT unless the question asks for one row, top N, highest, lowest, first, or similar.
+- For highest/lowest/largest/smallest/top questions, include ORDER BY on the requested measure and LIMIT when the number of requested rows is bounded.
 - For percentages, make the numerator and denominator match the wording of the question.
+- For "mostly", "more", or "which of A and B" questions, compare category counts or measures directly instead of returning raw rows.
 - For one overall average/count/sum/percentage, do not use GROUP BY unless the question asks for each/per/by group.
 - For dates and times, match the stored SQLite value format shown in schema/value hints.
+- Prefer joining through declared key columns shown in the schema; avoid joins on names/text unless no key exists.
 - Do not explain the query. Do not use markdown.
 """
 
 # Available placeholders: {schema}, {question}
-GENERATE_SQL_USER = """Schema:
+GENERATE_SQL_USER = """### Task
+Generate a SQLite SQL query to answer [QUESTION]{question}[/QUESTION]
+
+### Database Schema
+The query will run on a SQLite database with the following schema and value hints:
 {schema}
 
-Question:
-{question}
-
-Write the SQL query that answers the question."""
+### Answer
+Given the database schema, here is the SQL query that answers [QUESTION]{question}[/QUESTION]
+[SQL]"""
 
 
 VERIFY_SYSTEM = """You verify whether a SQLite query result plausibly answers a user question.

@@ -68,6 +68,14 @@ If done with curiosity, this assignment will bring you tons of knowledge about h
   
 You'll be working on a cloud VM. All services in this assignment listen on `localhost` on the VM, so to reach their UIs from your laptop browser you need to forward ports over your SSH session.
 
+For a fresh Ubuntu-style GPU VM, the quickest path is the bootstrap script from your local checkout:
+
+```bash
+scripts/bootstrap_vm.sh <user>@<vm-host>
+```
+
+It prints the required SSH `-L` port-forward command, installs system/Python dependencies, clones or updates this repo on the VM, optionally copies your local `.env`, runs `uv sync`, loads BIRD data when missing, starts Prometheus/Grafana/Langfuse with Docker Compose, and starts vLLM plus the agent. Set `START_TUNNEL=1` to keep the SSH tunnel open after bootstrap.
+
 You need five ports forwarded for the full assignment: **3000** (Grafana), **9090** (Prometheus), **3001** (Langfuse), **8000** (vLLM), **8001** (your agent server).
 
 

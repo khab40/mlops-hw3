@@ -107,6 +107,15 @@ ANSWER_CACHE_SIZE = Gauge(
     "agent_answer_cache_size",
     "Current number of entries in the in-process answer cache.",
 )
+AGENT_CIRCUIT_BREAKER_OPEN = Gauge(
+    "agent_circuit_breaker_open",
+    "Whether the agent circuit breaker is currently rejecting new uncached work.",
+)
+AGENT_CIRCUIT_BREAKER_EVENTS_TOTAL = Counter(
+    "agent_circuit_breaker_events_total",
+    "Circuit breaker events.",
+    ["event"],
+)
 
 
 def normalize_path(path: str) -> str:

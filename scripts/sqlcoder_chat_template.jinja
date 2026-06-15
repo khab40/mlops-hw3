@@ -1,0 +1,12 @@
+{%- for message in messages %}
+{%- if message['role'] == 'system' %}
+{{ message['content'].strip() }}
+
+{%- elif message['role'] == 'user' %}
+{{ message['content'].strip() }}
+
+{%- elif message['role'] == 'assistant' %}
+{{ message['content'].strip() }}
+
+{%- endif %}
+{%- endfor %}
